@@ -6,8 +6,6 @@
 #include <stdio.h>
 
 /*
-Eric Erkela, University of Washington, COHERENT Collaboration
-
 This root script will analyze an NaI characterization suite containing raw digitizer output
 data and calibrate them to a real energy scale.  More detailed analysis options are described
 below.
@@ -111,7 +109,6 @@ struct BackgroundPlots {
 
 struct FitWindow {
 	Double_t low;
-	Double_t center;
 	Double_t high;
 };
 
@@ -151,8 +148,7 @@ string getLabels(string mode, Int_t index);
 Double_t getRunTime(TChain *c, string mode);
 Double_t snapToMax(TH1D *h, FitWindow win);
 
-
-Int_t NUMBINS = 30000;
+Int_t NUMBINS = 10000;
 Int_t VOLTAGES[5] = {750, 810, 870, 930, 990};
 Int_t PEAKINGTIMES[5] = {50, 100, 200, 400, 800};
 Int_t POSITIONS[5] = {1, 2, 3, 4, 5};
@@ -162,7 +158,7 @@ Peaks PEAKS[5];
 Results RESULTS[5];
 
 
-void Calibration_newest(string mode, string option) {
+void Calibration(string mode, string option) {
 
 	//gStyle->SetOptFit(1111);
 	
@@ -198,12 +194,10 @@ void Calibration_newest(string mode, string option) {
 			if (binNum == 0) { break; }
 		}
 		Double_t TlPos = hTemp->GetXaxis()->GetBinCenter(binNum);
-
 		cout << "Estimated Tl Position: " << TlPos << endl;
 		
 		FitWindow TlSnapWindow;
 		TlSnapWindow.low = TlPos - 0.05 * TlPos;
-		TlSnapWindow.center = TlPos;
 		TlSnapWindow.high = TlPos + 0.05 * TlPos;		
 		TlPos = snapToMax(hTemp, TlSnapWindow);
 		Double_t TlNormalizedPos = (Double_t)hTemp->FindBin(TlPos) / (Double_t)NUMBINS;
@@ -218,14 +212,12 @@ void Calibration_newest(string mode, string option) {
 		data[i]->Draw(("energy >> " + hName).c_str(), "channel==0");
 
 		TlSnapWindow.low = TlPos - 0.05 * TlPos;
-		TlSnapWindow.center = TlPos;
 		TlSnapWindow.high = TlPos + 0.05 * TlPos;
 		TlPos = snapToMax(PLOTS[i].raw, TlSnapWindow);
 		Double_t TlCount = PLOTS[i].raw->GetBinContent(PLOTS[i].raw->FindBin(TlPos));
 
 		FitWindow TlFitWindow;
 		TlFitWindow.low = TlPos - 0.1 * TlPos;
-		TlFitWindow.center = TlPos;
 		TlFitWindow.high = TlPos + 0.1 * TlPos;
 
 		FitPars TlBackPars = backEst(PLOTS[i].raw, TlFitWindow, 0.4, "pol1", "Tl", i);
@@ -256,7 +248,6 @@ void Calibration_newest(string mode, string option) {
 		
 		FitWindow KSnapWindow;
 		KSnapWindow.low = KGuess - 0.05 * KGuess;
-		KSnapWindow.center = KGuess;
 		KSnapWindow.high = KGuess + 0.05 * KGuess;
 
 		Double_t KPos = snapToMax(PLOTS[i].raw, KSnapWindow);
@@ -264,7 +255,6 @@ void Calibration_newest(string mode, string option) {
 		
 		FitWindow KFitWindow;
 		KFitWindow.low = KPos - 0.15 * KPos;
-		KFitWindow.center = KPos;
 		KFitWindow.high = KPos + 0.15 * KPos;
 		
 		FitPars KBackPars = backEst(PLOTS[i].raw, KFitWindow, 0.3, "expo", "K", i);
@@ -295,7 +285,6 @@ void Calibration_newest(string mode, string option) {
 		
 		FitWindow CsSnapWindow;
 		CsSnapWindow.low = CsGuess - 0.05 * CsGuess;
-		CsSnapWindow.center = CsGuess;
 		CsSnapWindow.high = CsGuess + 0.05 * CsGuess;
 
 		Double_t CsPos = snapToMax(PLOTS[i].raw, CsSnapWindow);
@@ -303,7 +292,6 @@ void Calibration_newest(string mode, string option) {
 		
 		FitWindow CsFitWindow;
 		CsFitWindow.low = CsPos - 0.2 * CsPos;
-		CsFitWindow.center = CsPos;
 		CsFitWindow.high = CsPos + 0.2 * CsPos;
 	
 		FitPars CsBackPars = backEst(PLOTS[i].raw, CsFitWindow, 0.2, "expo", "Cs", i);
@@ -330,8 +318,8 @@ void Calibration_newest(string mode, string option) {
 		PEAKS[i].Cs.count = CsFit->GetParameter(0);
 
 		Float_t range = PEAKS[i].Tl.mu + 0.15 * PEAKS[i].Tl.mu;
-		PLOTS[i].raw->GetXaxis()->SetRangeUser(0, range);	
-
+		PLOTS[i].raw->GetXaxis()->SetRangeUser(0, range);
+		NUMBINS = 10000;	
 
 		// Collecting data:
 		Double_t expE[3] = {2615.0, 1460.0, 661.6};
@@ -388,14 +376,14 @@ void Calibration_newest(string mode, string option) {
 		PLOTS[i].calibrated->GetYaxis()->SetTitle("Count");
 		
 		string calibration = "(energy - " + to_string(RESULTS[i].calPars.offset);
-		calibration += ") / " + to_string(RESULTS[i].calPars.slope) ;
+		calibration += ") / " + to_string(RESULTS[i].calPars.slope);
 		calibration += " >> " + calName;
 		data[i]->Draw(calibration.c_str(), "channel==0", "goff");
 
 		Int_t noiseCount;
 		Int_t noiseBin = PLOTS[i].calibrated->FindBin(50);
 		Int_t noiseMin = 2 * PLOTS[i].calibrated->GetBinContent(noiseBin);
-		while(noiseCount < 2 * noiseMin) {
+		while (noiseCount < 2 * noiseMin) {
 			noiseCount = PLOTS[i].calibrated->GetBinContent(noiseBin);
 			if (noiseCount < noiseMin) {noiseMin = noiseCount;}
 			noiseBin--;
@@ -501,7 +489,6 @@ void Calibration_newest(string mode, string option) {
 	//////// END MODE HANDLING ////////
 
 	//////// BEGIN OPTION HANDLING ////////
-
 
 	if (option == "cal") {	
 		
@@ -712,14 +699,13 @@ void Calibration_newest(string mode, string option) {
 	} else if (option == "muon") {
 		// muons at about 10x Tl peak position.
 		// if it fails, get results and set to unphysical estimates;
-
+		/*
 		TCanvas *muonCanvas = new TCanvas("muonCanvas", "Muon Canvas", 1);
 		TH1D *muonHist = new TH1D("muonHist", "Muon Peak", "
 
 		data[0]->
+		*/
 	}
-
-	NUMBINS = 30000;
 
 }
 
