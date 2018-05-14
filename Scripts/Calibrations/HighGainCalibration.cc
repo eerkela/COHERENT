@@ -95,7 +95,7 @@ string getLabels(string mode, Int_t index);
 Double_t getRunTime(TChain *c, string mode);
 Double_t snapToMax(TH1D *h, FitWindow win);
 
-Int_t NUMBINS = 30000;
+Int_t NUMBINS = 10000;
 Int_t VOLTAGES[5] = {750, 810, 870, 930, 990};
 Int_t PEAKINGTIMES[5] = {50, 100, 200, 400, 800};
 Int_t POSITIONS[5] = {1, 2, 3, 4, 5};
@@ -134,7 +134,7 @@ void HighGainCalibration(string mode, string option) {
 		cout << "Finding 356 keV Region..." << endl;
 		UInt_t binNum = NUMBINS;
 		UInt_t totalCount = 0;
-		while (totalCount < (800.0 * time)) {
+		while (totalCount < (1500.0 * time)) {
 			totalCount += (UInt_t)hTemp->GetBinContent(binNum);
 			binNum--;
 			if (binNum == 0) {break;} 
@@ -143,8 +143,8 @@ void HighGainCalibration(string mode, string option) {
 		cout << "Estimated 356 keV peak position: " << pos356 << endl;
 
 		FitWindow snapWindow356;
-		snapWindow356.low = 0.95 * pos356;
-		snapWindow356.high = 1.05 * pos356;
+		snapWindow356.low = 0.9 * pos356;
+		snapWindow356.high = 1.1 * pos356;
 		pos356 = snapToMax(hTemp, snapWindow356);
 		Double_t pos356Normalized = (Double_t) hTemp->FindBin(pos356) / (Double_t) NUMBINS;
 
@@ -152,21 +152,21 @@ void HighGainCalibration(string mode, string option) {
 		
 		// Redraw histogram with constant number of bins below 356 peak to enhance fits.
 		delete hTemp;
-		NUMBINS = (Int_t) 500 / pos356Normalized;
+		NUMBINS = (Int_t) 1000 / pos356Normalized;
 		string hName = "h" + to_string(i+1);
 		PLOTS[i].raw = new TH1D(hName.c_str(), "Uncalibrated Spectrum", NUMBINS, 0, overflowBin);
 		data[i]->Draw(("energy >> " + hName).c_str(), "channel==2", "");
 		
-		snapWindow356.low = 0.95 * pos356;
-		snapWindow356.high = 1.05 * pos356;
+		snapWindow356.low = 0.9 * pos356;
+		snapWindow356.high = 1.1 * pos356;
 		pos356 = snapToMax(PLOTS[i].raw, snapWindow356);
 		Double_t count356 = PLOTS[i].raw->GetBinContent(PLOTS[i].raw->FindBin(pos356));
 
 		FitWindow fitWindow356;
-		fitWindow356.low = 0.96 * pos356;
+		fitWindow356.low = 0.6 * pos356;
 		fitWindow356.high = 1.22 * pos356;
 
-		FitPars backPars356 = backEst(PLOTS[i].raw, fitWindow356, 0.2, "pol1", "356", i);
+		FitPars backPars356 = backEst(PLOTS[i].raw, fitWindow356, 0.1, "pol1", "356", i);
 		
 		string fitFunc356 = "[0]*exp(-0.5*((x-[1])/[2])^2)";
 		fitFunc356 += " + [3]*exp(-0.5*((x-[4])/[2])^2)";
@@ -214,11 +214,11 @@ void HighGainCalibration(string mode, string option) {
 
 		// Fitting 80 keV peaks:
 		cout << "Fitting 80 keV Region..." << endl;
-		Double_t pos81 = (80.0/356.0) * PEAKS[i].p356.mu;
+		Double_t pos81 = (81.0/356.0) * PEAKS[i].p356.mu;
 		
 		FitWindow snapWindow81;
-		snapWindow81.low = 0.95 * pos81;
-		snapWindow81.high = 1.05 * pos81;
+		snapWindow81.low = 0.9 * pos81;
+		snapWindow81.high = 1.1 * pos81;
 
 		pos81 = snapToMax(PLOTS[i].raw, snapWindow81);
 		Double_t count81 = PLOTS[i].raw->GetBinContent(PLOTS[i].raw->FindBin(pos81));
@@ -227,7 +227,7 @@ void HighGainCalibration(string mode, string option) {
 		fitWindow81.low = 0.725 * pos81;
 		fitWindow81.high = 1.25 * pos81;
 		
-		FitPars backPars81 = backEst(PLOTS[i].raw, fitWindow81, 0.2, "pol1", "81", i);
+		FitPars backPars81 = backEst(PLOTS[i].raw, fitWindow81, 0.3, "pol1", "81", i);
 		
 		string fitFunc81 = "[0]*exp(-0.5*((x-[1])/[2])^2)";
 		fitFunc81 += " + [3]*exp(-0.5*((x-[4])/[2])^2)";
@@ -257,17 +257,17 @@ void HighGainCalibration(string mode, string option) {
 		Double_t pos31 = (31.0/356.0) * PEAKS[i].p356.mu;
 		
 		FitWindow snapWindow31;
-		snapWindow31.low = 0.5 * pos31;
+		snapWindow31.low = 0.6 * pos31;
 		snapWindow31.high = 1.4 * pos31;
 	
 		pos31 = snapToMax(PLOTS[i].raw, snapWindow31);
 		Double_t count31 = PLOTS[i].raw->GetBinContent(PLOTS[i].raw->FindBin(pos31));
 		
 		FitWindow fitWindow31;
-		fitWindow31.low = 0.8 * pos31;
-		fitWindow31.high = 1.2 * pos31;
+		fitWindow31.low = 0.7 * pos31;
+		fitWindow31.high = 1.3 * pos31;
 
-		FitPars backPars31 = backEst(PLOTS[i].raw, fitWindow31, 0.2, "pol1", "31", i);
+		FitPars backPars31 = backEst(PLOTS[i].raw, fitWindow31, 0.4, "pol1", "31", i);
 
 		string fitFunc31 = "[0]*exp(-0.5*((x-[1])/[2])^2)";
 		fitFunc31 += " + [3]*exp(-0.5*((x-[4])/[2])^2)";
@@ -294,7 +294,7 @@ void HighGainCalibration(string mode, string option) {
 
 		Float_t range = PEAKS[i].p383.mu + 0.15 * PEAKS[i].p383.mu;
 		PLOTS[i].raw->GetXaxis()->SetRangeUser(0, range);
-		NUMBINS = 30000;
+		NUMBINS = 10000;
 
 		// Collecting data:
 		Double_t expE[6];
