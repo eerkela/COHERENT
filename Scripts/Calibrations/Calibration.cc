@@ -136,6 +136,7 @@ struct Results {
 	
 	Double_t noiseWall;
 	Double_t bestPeakTime;
+	Double_t lowERate;
 };
 
 Int_t NUMFILES = 5;
@@ -380,6 +381,15 @@ void Calibration(string mode, string option) {
 		calibration += " >> " + calName;
 		data[i]->Draw(calibration.c_str(), "channel==0", "goff");
 
+		Int_t rateCount;
+		Int_t rateBin = PLOTS[i].calibrated->FindBin(50);
+		while (rateBin > 0) {
+			rateCount += PLOTS[i].calibrated->GetBinCotent(rateBin);
+			rateCount--;
+		}
+		RESULTS[i].lowERate = (Double_t) rateCount / (Double_t) time;
+		cout << "Rate below 50 keV: " << RESULTS[i].lowERate << endl;
+		
 		Int_t noiseCount;
 		Int_t noiseBin = PLOTS[i].calibrated->FindBin(50);
 		Int_t noiseMin = 2 * PLOTS[i].calibrated->GetBinContent(noiseBin);
@@ -408,7 +418,7 @@ void Calibration(string mode, string option) {
 		for (Int_t k = 0; k < NUMFILES; k++) {
 			peakingTimes[k] = PEAKINGTIMES[k];
 			//peakingTimes[k] = data[i]->GetLeaf("peaktime")->GetValue();
-			FIRResolution[k] = pow(PEAKS[k].Cs.sigma / PEAKS[k].Cs.mu, 2.0);
+			FIRResolution[k] = pow(PEAKS[k].K.sigma / PEAKS[k].K.mu, 2.0);
 		}
 		TGraph *FIROptPlot = new TGraph(5, peakingTimes, FIRResolution);
 		string FIRFitFunc = "([0]/x)^2 + [1]^2 + ([3]*x)^2";
@@ -422,7 +432,7 @@ void Calibration(string mode, string option) {
 
 	} else if (mode == "pos") {
 
-		Double_t resolution = PEAKS[3].Cs.sigma / PEAKS[3].Cs.mu;
+		Double_t resolution = PEAKS[3].K.sigma / PEAKS[3].K.mu;
 		cout << "Normalized detector resolution (width of Cs peak" << endl;
 		cout << " / mean at 3rd position):" << resolution << endl;
 		
@@ -431,10 +441,10 @@ void Calibration(string mode, string option) {
 		Double_t CsSig[NUMFILES];
 		Double_t CsSigErrs[NUMFILES];
 		for (Int_t k = 0; k < NUMFILES; k++) {
-			CsPos[k] = PEAKS[k].Cs.mu;
-			CsPosErrs[k] = PEAKS[k].Cs.muErr;
-			CsSig[k] = PEAKS[k].Cs.sigma / PEAKS[k].Cs.mu;
-			CsSigErrs[k] = PEAKS[k].Cs.sigmaErr / PEAKS[k].Cs.mu;
+			CsPos[k] = PEAKS[k].K.mu;
+			CsPosErrs[k] = PEAKS[k].K.muErr;
+			CsSig[k] = PEAKS[k].K.sigma / PEAKS[k].K.mu;
+			CsSigErrs[k] = PEAKS[k].K.sigmaErr / PEAKS[k].K.mu;
 		}
 
 		Double_t xAxis[NUMFILES];
