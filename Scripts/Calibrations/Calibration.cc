@@ -195,7 +195,17 @@ void Calibration(string mode, string option) {
 			if (binNum == 0) { break; }
 		}
 		Double_t TlPos = hTemp->GetXaxis()->GetBinCenter(binNum);
+		Double_t newTlPos;
+		cout << "VISUAL CHECK" << endl;
 		cout << "Estimated Tl Position: " << TlPos << endl;
+		cout << "Does this make sense?" << endl;
+		cout << "New Tl position (enter nothing to continue using the above estimation): " << endl;
+		cout << " >> ";
+		cin >> newTlPos;
+		cout << endl;
+		if (newTlPos != NULL && newTlPos > 0) {
+			TlPos = newTlPos;
+		}
 		
 		FitWindow TlSnapWindow;
 		TlSnapWindow.low = TlPos - 0.05 * TlPos;
