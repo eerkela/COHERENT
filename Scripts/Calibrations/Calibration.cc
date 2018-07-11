@@ -4,18 +4,27 @@
 #include <TH1.h>
 #include <TF1.h>
 #include <stdio.h>
+#include <algorithm>
+#include <TApplication.h>
+#include <TRint.h>
+#include <TGraph.h>
+#include <TGraphErrors.h>
+#include <TChain.h>
+#include <TMultiGraph.h>
+#include <TH2D.h>
+#include <stdexcept>
 
 /*
-This root script will analyze an NaI characterization suite containing raw digitizer output
-data and calibrate them to a real energy scale.  More detailed analysis options are described
-below.
-
+This script (built using the ROOT Data Analysis Framework from CERN) will analyze a 
+characterization suite for a Thalium-doped Sodium Iodide (NaI[Tl]) crystal scintillator, 
+the data for which has been collected according to the University of Washington COHERENT group's 
+official protocol.  Baseline, it will translate root-readable raw digitizer output for a crystal 
+and calibrate the collected data to a real energy scale, but more detailed analysis may be done 
+using one of the options described below.
 
 Modes:
 "pos"	will execute calibration algorithm for position data.
 "volt"	will execute calibration algorithm for voltage data.
-"fir"	will perform FIR filter optimization.
-
 
 Options:
 "cal" 		will display the graphs used to generate the calibrations for each run.
@@ -34,34 +43,36 @@ Options:
 "muon" (NYI)	will fit the muon peak.
 
 
-Directory structure:
+Required Directory structure for Calibration to work:
 Crystal Serial #/
 	Characterization.cc
-	FIR/
-		.../1/NaI_ET_run*.root
-		.../2/NaI_ET_run*.root
-		.../3/NaI_ET_run*.root
-		.../4/NaI_ET_run*.root
-		.../5/NaI_ET_run*.root
 	Position/
-		.../1/NaI_ET_run*.root
-		.../2/NaI_ET_run*.root
-		.../3/NaI_ET_run*.root
-		.../4/NaI_ET_run*.root
-		.../5/NaI_ET_run*.root
+		.../position_1/NaI_ET_run*.root
+		.../position_2/NaI_ET_run*.root
+		.../position_3/NaI_ET_run*.root
+		.../position_4/NaI_ET_run*.root
+		.../position_5/NaI_ET_run*.root
 	Voltage/
-		.../600V/NaI_ET_run*.root
-		.../700V/NaI_ET_run*.root
-		.../800V/NaI_ET_run*.root
-		.../900V/NaI_ET_run*.root
-		.../1000V/NaI_ET_run*.root	
+		.../600_V/NaI_ET_run*.root
+		.../700_V/NaI_ET_run*.root
+		.../800_V/NaI_ET_run*.root
+		.../900_V/NaI_ET_run*.root
+		.../1000_V/NaI_ET_run*.root	
 
 
 Notes and TODO:
+
+	Data randomly deletes itself during execution.  This is almost certainly just a quirk 
+	of root itself, but I can't figure out exactly how to get around it atm.
 	
-	Current script version does not pull peaking times directly from the .roots.  Instead they
-	are hardcoded in. We've modified getSpectrum to pull them out of the file itself, but
-	when I try to access them, I just get zeros.
+	FIR stuff removed because it turns out the detector response to peaking time is mostly
+	flat in the region we're sensitive to.
+
+	Continue making the script agnostic to low/high gain data.  This is mostly complete by
+	now, but I haven't had the chance to test it yet.  Ideally, we can take this one version
+	of the script and use it for both possible data sets since the underlying algorithm is
+	the same between them.  However, all the peaks we're actually fitting are different, 
+	which makes it more difficult to generalize.
 
 	Fix Cs fit.  There's a few peaks underneath it that kind of screw it up.  Might want to
 	fix some parameters.
@@ -69,16 +80,25 @@ Notes and TODO:
 	Figure out how to do math on TChains.  I want to store the calibrated data in the RESULTS
 	struct somewhere, but I need to apply the calibration directly to the data in that case.
 
-	Estimate Tl position without drawing the hist.  This wouldn't change the functionality,
-	but would save on runtime.
+	Figure out how to get the visual check functioning correctly.
 
 */
 
 using namespace std;
 
-//////// BEGIN INTERNAL STRUCTS ////////
+/*
+   ###################
+   #     STRUCTS     #
+   ###################
+*/
+
+struct FitWindow {
+	Double_t low;
+	Double_t high;
+};
 
 struct PeakInfo {
+	Double_t energy;
 	Double_t mu;
 	Double_t muErr;
 	Double_t sigma;
@@ -86,36 +106,18 @@ struct PeakInfo {
 	Double_t count;
 };
 
-struct FitPars {
+struct FitResults {
 	Double_t offset;
 	Double_t offsetErr;
 	Double_t slope;
 	Double_t slopeErr;
 };
 
-struct Residues {
-	Double_t Tl;
-	Double_t K;
-	Double_t Cs;
-};
-
-struct BackgroundPlots {
-	TGraph *Tl;
-	TGraph *K;
-	TGraph *Cs;
-};
-
-//////// END INTERNAL STRUCTS ////////
-
-struct FitWindow {
-	Double_t low;
-	Double_t high;
-};
-
-struct Peaks {
-	PeakInfo Tl;
-	PeakInfo K;
-	PeakInfo Cs;
+struct FitInfo {
+	vector<Double_t> peakEnergies;
+	string fitFunc;
+	FitWindow fitWindow;
+	Double_t backgroundRange;
 };
 
 struct Plots {
@@ -126,12 +128,10 @@ struct Plots {
 	TGraphErrors *calPlot;
 	TGraphErrors *sigmaPlot;
 
-	BackgroundPlots backPlots;
 };
 
 struct Results {
-	FitPars calPars;	
-	Residues residues;
+	FitResults calPars;
 	TChain calibratedData;
 	
 	Double_t noiseWall;
@@ -139,38 +139,343 @@ struct Results {
 	Double_t lowERate;
 };
 
-Int_t NUMFILES = 5;
+/*
+   ###################
+   #     PEAKSET     #
+   ###################
+*/
 
-FitPars backEst(TH1D *h, FitWindow win, Double_t coverage, string func, string peak, Int_t i);
+class PeakSet {
+private:
+	vector<PeakInfo> peakPars;
+
+public:
+	PeakSet(vector<Double_t> energies) {
+		for(Int_t i = 0; i < energies.size(); i++) {
+			PeakInfo curr;
+			curr.energy = energies[i];
+			this->put(curr);
+		}
+	}
+	
+	PeakSet() {
+		// do nothing.  PeakPars will be a vector with no elements.
+	}
+
+	void put(PeakInfo info) {
+		Int_t index = this->indexOf(info.energy);
+		if (index == -1) {
+			this->peakPars.push_back(info);
+		} else {
+			this->peakPars[index].mu = info.mu;
+			this->peakPars[index].muErr = info.muErr;
+			this->peakPars[index].sigma = info.sigma;
+			this->peakPars[index].sigmaErr = info.sigmaErr;
+			this->peakPars[index].count = info.count;
+		}
+	}
+
+	PeakInfo get(Double_t energy) {
+		Int_t index = this->indexOf(energy);
+		if (index == -1) {
+			throw invalid_argument("peak not in set: " + to_string(energy) + " keV");
+		}
+		return this->peakPars[index];
+	}
+
+	PeakInfo getHighestEnergyPeak() {
+		PeakInfo max;
+		for (Int_t i = 0; i < this->peakPars.size(); i++) {
+			PeakInfo curr = this->peakPars[i];
+			if (curr.energy > max.energy) {
+				max = curr;
+			}
+		}
+		return max;
+	}
+
+	Int_t indexOf(Double_t energy) {
+		for (Int_t i = 0; i < this->peakPars.size(); i++) {
+			PeakInfo curr = this->peakPars[i];
+			if (curr.energy == energy) {
+				return i;
+			}
+		}
+		return -1;
+	
+	}
+
+	bool contains(Double_t energy) {
+		return this->indexOf(energy) != -1;
+	}
+
+	Int_t size() {
+		return this->peakPars.size();
+	}
+};
+
+
+/*
+   ######################
+   #     PEAKFINDER     #
+   ######################
+*/
+
+class PeakFinder {
+// This class describes a set of PeakInfo structs that is searchable by their energies.
+// An object of this type will house all the pertinent info collected for each peak
+private:
+	TChain *data;
+	TH1D *plot;
+	Double_t time;
+	Int_t numBins;
+	string channel;
+	PeakSet peaks;
+	PeakInfo pinnedPeak;
+
+	//TApplication* app;
+
+	Double_t snapToMax(TH1D *h, Int_t pos, Double_t low, Double_t high) {
+		h->GetXaxis()->SetRangeUser(low, high);
+		Double_t maxPos = h->GetXaxis()->GetBinCenter(h->GetMaximumBin());
+		h->GetXaxis()->SetRangeUser(0, this->getOverflowPos());
+		return maxPos;
+	}
+	
+public:
+	PeakFinder(TChain *c, PeakSet peaks, Double_t time, string channel) {
+		// give me a vector of energies sorted in the order they will be searched in.
+		//this->app = new TRint("app", 0, NULL);
+		this->data = c;
+		this->time = time;
+		this->channel = channel;
+		this->peaks = peaks;
+		
+		Int_t numBins = 10000;
+		TCanvas *tempCanvas = new TCanvas("tempCanvas", "tempCanvas");
+		gPad->SetLogy();
+
+		Double_t overflowPos = 1.01 * this->data->GetMaximum("energy");
+		TH1D *hTemp = new TH1D("hTemp", "Finding Max E", numBins, 0, overflowPos);
+		this->data->Draw("energy >> hTemp", this->channel.c_str());
+
+		Int_t binNum = numBins;
+		Int_t count = 0;
+		while ((Double_t) count < 9.0 * time && binNum > 0) {
+			count += (Int_t) hTemp->GetBinContent(binNum);
+			binNum--;
+		}
+		Double_t pos = hTemp->GetXaxis()->GetBinCenter(binNum);
+		pos = this->snapToMax(hTemp, pos, 0.95 * (Double_t) pos, 1.05 * (Double_t) pos);
+		hTemp->Draw();
+
+		cout << "VISUAL CHECK" << endl;
+		cout << "estimated position for highest energy peak: " << pos << endl;
+		//this->app->Run(true);
+		cout << "does this make sense? (y/n) ";
+		string response;
+		cin >> response;
+		while (response != "y" && response != "n") {
+			cout << "error: cannot interpret response \"" + response + "\"" << endl;
+			cout << "estimated position for highest energy peak: ";
+			         cout << pos << endl;
+			cout << "does this make sense? (y/n) ";
+			cin >> response;
+		}
+		if (response == "n") {
+			cout << "new peak position: ";
+			cin >> pos;
+			pos = this->snapToMax(hTemp, pos, 0.95 * pos, 1.05 * pos);
+		}
+		delete hTemp;
+		delete tempCanvas;
+
+		Double_t normPos = pos / overflowPos;
+		
+		numBins = (Int_t) (500.0 / normPos);
+		this->numBins = numBins;
+		TH1D *h = new TH1D("h", "Uncalibrated Spectrum", numBins, 0, overflowPos);
+		this->data->Draw("energy >> h", channel.c_str());
+		this->plot = h;
+		
+		PeakInfo firstPeakInfo = this->peaks.getHighestEnergyPeak();
+		firstPeakInfo.mu = pos;
+		firstPeakInfo.count = h->GetBinContent(h->FindBin(pos));
+		this->pinnedPeak = firstPeakInfo;
+		this->peaks.put(firstPeakInfo);
+	}
+
+	Int_t findPeak(Double_t energy) {
+		Double_t pinnedEnergy = this->pinnedPeak.energy;
+		Double_t pinnedPosition = this->pinnedPeak.mu;
+		Double_t scaleFactor = pinnedPosition / pinnedEnergy;
+
+		//cout << "pinnedEnergy: " << pinnedEnergy << endl;
+		//cout << "pinnedPosition: " << pinnedPosition << endl;
+		//cout << "Scale Factor: " << scaleFactor << endl;
+		
+		Double_t pos = energy * scaleFactor;
+		cout << "Estimated position: " << pos << endl;
+		pos = this->snapToMax(this->plot, pos, 0.95 * pos, 1.05 * pos);
+		
+		PeakInfo peak = this->peaks.get(energy);
+		peak.mu = pos;
+		peak.count = this->plot->GetBinContent(this->plot->FindBin(pos));
+
+		return pos;
+	}
+
+	FitResults backEst(FitWindow win, Double_t range, string fitFunc) {
+		TH1D *h = this->plot;
+		
+		Int_t lowBin = h->FindBin(win.low);
+		Int_t highBin = h->FindBin(win.high);
+		Int_t overallBinRange = highBin - lowBin;
+		Int_t backWindowRange = (Int_t) ((range / 2.0) * (Double_t) overallBinRange);
+
+		Float_t backVals[2 * backWindowRange];
+		Float_t backPos[2 * backWindowRange];
+
+		for (Int_t i = 0; i < backWindowRange; i++) {
+			Int_t bin = i + lowBin;
+			backVals[i] = h->GetBinContent(bin);
+			backPos[i] = h->GetBinCenter(bin);
+		}
+		for (Int_t i = 0; i < backWindowRange; i++) {
+			Int_t bin = (highBin - backWindowRange) + (i + 1);
+			backVals[i + backWindowRange] = h->GetBinContent(bin);
+			backPos[i + backWindowRange] = h->GetBinCenter(bin);
+		}
+
+		TGraph *backGraph = new TGraph(2 * backWindowRange, backPos, backVals);
+		TF1 backFit = TF1("backFit", fitFunc.c_str(), win.low, win.high);
+		backGraph->Fit("backFit");
+
+		FitResults pars;
+		pars.offset = backFit.GetParameter(0);
+		pars.slope = backFit.GetParameter(1);
+		
+		backGraph->GetYaxis()->SetTitle("Count");
+		backGraph->GetXaxis()->SetTitle("Uncalibrated Energy");
+		backGraph->SetMarkerStyle(4);
+		backGraph->SetMarkerSize(0.5);
+
+		backGraph->Draw();
+		delete backGraph;
+		return pars;
+	}
+
+	void fit(vector<Double_t> energies, FitWindow win, string fitFunc, 
+	         vector<Double_t> pars, Double_t backRange) {
+		TH1D *h = this->plot;
+		Int_t pos = this->findPeak(energies[0]);
+		Int_t count = h->GetBinContent(h->FindBin(pos));
+		
+		FitResults backPars = this->backEst(win, backRange, "expo");
+		pars.push_back(backPars.offset);
+		pars.push_back(backPars.slope);
+
+		Double_t parArray[pars.size()];
+		for (Int_t i = 0; i < pars.size(); i++) {
+			parArray[i] = pars[i];
+		}
+		
+		TF1 *fit = new TF1("fit", fitFunc.c_str(), win.low, win.high);
+		fit->SetParameters(parArray);
+		h->Fit("fit", "R+ll");
+
+		for (Int_t i = 0; i < energies.size(); i++) {
+			PeakInfo curr;
+			curr.energy = energies[i];
+			curr.count = fit->GetParameter(3 * i);
+			curr.mu = fit->GetParameter(3 * i + 1);
+			curr.muErr = fit->GetParameter(3 * i + 1);
+			curr.sigma = fit->GetParameter(3 * i + 2);
+			curr.sigmaErr = fit->GetParameter(3 * i + 2);
+			this->peaks.put(curr);
+		}
+		delete fit;
+	}
+
+	Double_t getOverflowPos() {
+		return 1.01 * this->data->GetMaximum("energy");
+	}
+
+	PeakSet getPeakSet() {
+		return this->peaks;
+	}
+
+	TH1D* getPlot() {
+		return this->plot;
+	}
+
+};
+
+/*
+   ################
+   #     MAIN     #
+   ################
+*/
+
+#define NUMFILES 5
+
 void formatGraph(TGraphErrors *graph);
 void getData(TChain *data[NUMFILES], string mode);
 string getDepVar(string mode);
 string getLabels(string mode, Int_t index);
 Double_t getRunTime(TChain *c, string mode);
-Double_t snapToMax(TH1D *h, FitWindow win);
 
-Int_t NUMBINS = 10000;
-Int_t VOLTAGES[5] = {750, 810, 870, 930, 990};
-Int_t PEAKINGTIMES[5] = {50, 100, 200, 400, 800};
-Int_t POSITIONS[5] = {1, 2, 3, 4, 5};
+Int_t VOLTAGES[NUMFILES] = {600, 700, 800, 900, 1000}; 
+//Int_t PEAKINGTIMES[5] = {50, 100, 200, 400, 800};
+Int_t POSITIONS[NUMFILES] = {1, 2, 3, 4, 5};
 
-Plots PLOTS[5];
-Peaks PEAKS[5];
-Results RESULTS[5];
-
+vector<PeakSet> PEAKS(NUMFILES);
+vector<Plots> PLOTS(NUMFILES);
+vector<Results> RESULTS(NUMFILES);
 
 void Calibration(string mode, string option) {
 
+	// global variable gdirectory.
+	// cd to groot before allocating memory.  groot->cd().
+
 	//gStyle->SetOptFit(1111);
-	
 	TCanvas *fitCanvas = new TCanvas("Fits", "Fits", 1200, 800);
 	fitCanvas->Divide(2, 3);
 	TChain *data[NUMFILES]; 
 	getData(data, mode);
+	string channel = "channel==4";
+	vector<FitInfo> fitPars;
+
+	// Tl peak parameters:
+	FitInfo TlPars;
+	TlPars.peakEnergies.push_back(2615.0);
+	TlPars.fitFunc = "[0] * exp(-0.5 * ((x - [1]) / 0.05 * [2])^2) + exp([3] + [4] * x)";
+	TlPars.fitWindow.low = 0.9;
+	TlPars.fitWindow.high = 1.1;
+	TlPars.backgroundRange = 0.3;
+	fitPars.push_back(TlPars);
+	
+	// K peak parameters:
+	FitInfo KPars;
+	KPars.peakEnergies.push_back(1460.0);
+	KPars.fitFunc = "[0] * exp(-0.5 * ((x - [1]) / 0.05 * [2])^2) + exp([3] + [4] * x)";
+	KPars.fitWindow.low = 0.85;
+	KPars.fitWindow.high = 1.15;
+	KPars.backgroundRange = 0.3;
+	fitPars.push_back(KPars);
+
+	// Cs peak parameters:
+	FitInfo CsPars;
+	CsPars.peakEnergies.push_back(661.6);
+	CsPars.fitFunc = "[0] * exp(-0.5 * ((x - [1]) / 0.05 * [2])^2) + exp([3] + [4] * x)";
+	CsPars.fitWindow.low = 0.8;
+	CsPars.fitWindow.high = 1.2;
+	CsPars.backgroundRange = 0.3;
+	fitPars.push_back(CsPars);
 
 	for (Int_t i = 0; i < NUMFILES; i++) {
 		cout << endl;
-		cout << "---------------------------------------------------------------" << endl;
+		cout << "--------------------------------------------------------------" << endl;
 		cout << endl;
 
 		cout << "Beginning Calibration " << i + 1 << "..." << endl;
@@ -179,178 +484,66 @@ void Calibration(string mode, string option) {
 
 		Double_t time = getRunTime(data[i], mode);
 		cout << "Run time in data chain: " << time << " seconds" << endl;
-		Int_t overflowBin = data[i]->GetMaximum("energy");
-		overflowBin += 0.01 * overflowBin;
 
-		TH1D *hTemp = new TH1D("hTemp", "Finding Tl pos", NUMBINS, 0, overflowBin);
-		data[i]->Draw("energy >> hTemp", "channel==0");
-		
-		// Finding Thalium:
-		cout << "Finding Thalium Peak..." << endl;
-		UInt_t binNum = NUMBINS;
-		UInt_t totalCount = 0;
-		while (totalCount < 13.6 * time) {
-			totalCount += (UInt_t) hTemp->GetBinContent(binNum);
-			binNum--;
-			if (binNum == 0) { break; }
+		PeakSet allPeaks;
+		vector<Double_t> allPeakEnergies;
+		for (Int_t j = 0; j < fitPars.size(); j++) {
+			vector<Double_t> thisPeakEnergies = fitPars[j].peakEnergies;
+			for (Int_t k = 0; k < thisPeakEnergies.size(); k++) {
+				allPeakEnergies.push_back(thisPeakEnergies[k]);
+				PeakInfo curr;
+				curr.energy = thisPeakEnergies[k];
+				allPeaks.put(curr);
+			}
 		}
-		Double_t TlPos = hTemp->GetXaxis()->GetBinCenter(binNum);
-		Double_t newTlPos;
-		cout << "VISUAL CHECK" << endl;
-		cout << "Estimated Tl Position: " << TlPos << endl;
-		cout << "Does this make sense?" << endl;
-		cout << "New Tl position (enter nothing to continue using the above estimation): " << endl;
-		cout << " >> ";
-		cin >> newTlPos;
-		cout << endl;
-		if (newTlPos != NULL && newTlPos > 0) {
-			TlPos = newTlPos;
+		PeakFinder *analyzer = new PeakFinder(data[i], allPeaks, time, channel.c_str());
+		
+		for (Int_t j = 0; j < fitPars.size(); j++) {
+			FitInfo pars = fitPars[j];
+
+			PeakInfo estimate = analyzer->getPeakSet().get(pars.peakEnergies[0]);
+			FitWindow actualWin;
+			actualWin.low = pars.fitWindow.low * estimate.mu;
+			actualWin.high = pars.fitWindow.high * estimate.mu;
+
+			Int_t numPars = 0;  // counting # of pars needed in fit
+			for (Int_t k = 0; k < pars.fitFunc.length(); k++) {
+				char c = pars.fitFunc[k];
+				if (c == '[') {
+					numPars++;
+				}
+			}
+			
+			vector<Double_t> initialGuesses;
+			for (Int_t k = 0; k < numPars / 3; k++) {
+				initialGuesses.push_back(estimate.count);
+				initialGuesses.push_back(estimate.mu);
+				initialGuesses.push_back(estimate.mu);
+			}
+			
+			analyzer->fit(pars.peakEnergies, actualWin, pars.fitFunc,
+                                      initialGuesses, pars.backgroundRange);
 		}
-		
-		FitWindow TlSnapWindow;
-		TlSnapWindow.low = TlPos - 0.05 * TlPos;
-		TlSnapWindow.high = TlPos + 0.05 * TlPos;		
-		TlPos = snapToMax(hTemp, TlSnapWindow);
-		Double_t TlNormalizedPos = (Double_t)hTemp->FindBin(TlPos) / (Double_t)NUMBINS;
+		PEAKS[i] = analyzer->getPeakSet();
 
-		cout << "Snapped Tl Position: " << TlPos << endl;
-		
-		// Redraw hist with constant number of bins below Tl peak (enhances fits).
-		delete hTemp;
-		NUMBINS = (Int_t) 500/TlNormalizedPos;
-		string hName = "h" + to_string(i+1);
-		PLOTS[i].raw = new TH1D(hName.c_str(), "Uncalibrated Spectrum", NUMBINS, 0, overflowBin);
-		data[i]->Draw(("energy >> " + hName).c_str(), "channel==0");
-
-		TlSnapWindow.low = TlPos - 0.05 * TlPos;
-		TlSnapWindow.high = TlPos + 0.05 * TlPos;
-		TlPos = snapToMax(PLOTS[i].raw, TlSnapWindow);
-		Double_t TlCount = PLOTS[i].raw->GetBinContent(PLOTS[i].raw->FindBin(TlPos));
-
-		FitWindow TlFitWindow;
-		TlFitWindow.low = TlPos - 0.1 * TlPos;
-		TlFitWindow.high = TlPos + 0.1 * TlPos;
-
-		FitPars TlBackPars = backEst(PLOTS[i].raw, TlFitWindow, 0.4, "pol1", "Tl", i);
-
-		string TlFitFunc = "[0]*exp(-0.5*((x-[1])/[2])^2)";
-		TlFitFunc += " + [3] + [4] * x";
-
-		Double_t TlParameters[5];
-		TlParameters[0] = TlCount;
-		TlParameters[1] = TlPos;
-		TlParameters[2] = 0.05 * TlPos;
-		TlParameters[3] = TlBackPars.offset;
-		TlParameters[4] = TlBackPars.slope;
-
-		TF1 *TlFit = new TF1("TlFit", TlFitFunc.c_str(), TlFitWindow.low, TlFitWindow.high);
-		TlFit->SetParameters(TlParameters);
-		PLOTS[i].raw->Fit("TlFit", "R+ll");
-		
-		PEAKS[i].Tl.mu = TlFit->GetParameter(1);
-		PEAKS[i].Tl.muErr = TlFit->GetParError(1);
-		PEAKS[i].Tl.sigma = TlFit->GetParameter(2);
-		PEAKS[i].Tl.sigmaErr = TlFit->GetParError(2);
-		PEAKS[i].Tl.count = TlFit->GetParameter(0);
-
-		// Finding Potassium:
-		cout << "Fitting Potassium peak..." << endl;
-		Double_t KGuess = (1460.0/2615.0) * PEAKS[i].Tl.mu;
-		
-		FitWindow KSnapWindow;
-		KSnapWindow.low = KGuess - 0.05 * KGuess;
-		KSnapWindow.high = KGuess + 0.05 * KGuess;
-
-		Double_t KPos = snapToMax(PLOTS[i].raw, KSnapWindow);
-		Double_t KCount = PLOTS[i].raw->GetBinContent(PLOTS[i].raw->FindBin(KPos));
-		
-		FitWindow KFitWindow;
-		KFitWindow.low = KPos - 0.15 * KPos;
-		KFitWindow.high = KPos + 0.15 * KPos;
-		
-		FitPars KBackPars = backEst(PLOTS[i].raw, KFitWindow, 0.3, "expo", "K", i);
-		
-		string KFitFunc = "[0]*exp(-0.5*((x-[1])/[2])^2)";
-		KFitFunc += " + exp([3] + [4] * x)";
-
-		Double_t KParameters[5];
-		KParameters[0] = KCount;
-		KParameters[1] = KPos;
-		KParameters[2] = 0.05 * KPos;
-		KParameters[3] = KBackPars.offset;
-		KParameters[4] = KBackPars.slope;
-
-		TF1 *KFit = new TF1("KFit", KFitFunc.c_str(), KFitWindow.low, KFitWindow.high);
-		KFit->SetParameters(KParameters);
-		PLOTS[i].raw->Fit("KFit", "R+ll");
-		
-		PEAKS[i].K.mu = KFit->GetParameter(1);
-		PEAKS[i].K.muErr = KFit->GetParError(1);
-		PEAKS[i].K.sigma = KFit->GetParameter(2);
-		PEAKS[i].K.sigmaErr = KFit->GetParError(2);
-		PEAKS[i].K.count = KFit->GetParameter(0);
-
-		// Finding Cs:
-		cout << "Fitting Cesium Peak" << endl;
-		Double_t CsGuess = (661.6/2615.0) * PEAKS[i].Tl.mu;
-		
-		FitWindow CsSnapWindow;
-		CsSnapWindow.low = CsGuess - 0.05 * CsGuess;
-		CsSnapWindow.high = CsGuess + 0.05 * CsGuess;
-
-		Double_t CsPos = snapToMax(PLOTS[i].raw, CsSnapWindow);
-		Double_t CsCount = PLOTS[i].raw->GetBinContent(PLOTS[i].raw->FindBin(CsPos));
-		
-		FitWindow CsFitWindow;
-		CsFitWindow.low = CsPos - 0.2 * CsPos;
-		CsFitWindow.high = CsPos + 0.2 * CsPos;
-	
-		FitPars CsBackPars = backEst(PLOTS[i].raw, CsFitWindow, 0.2, "expo", "Cs", i);
-
-		string CsFitFunc = "[0]*exp(-0.5*((x-[1])/[2])^2)";
-		//CsFitFunc += " + [3]*exp(-0.5*((x-[4])/[5])^2)";
-		CsFitFunc += " + exp([3] + [4] * x)";
-
-		Double_t CsParameters[5];
-		CsParameters[0] = CsCount;
-		CsParameters[1] = CsPos;
-		CsParameters[2] = 0.05 * CsPos;
-		CsParameters[3] = CsBackPars.offset;
-		CsParameters[4] = CsBackPars.slope;
-
-		TF1 *CsFit = new TF1("CsFit", CsFitFunc.c_str(), CsFitWindow.low, CsFitWindow.high);
-		CsFit->SetParameters(CsParameters);
-		PLOTS[i].raw->Fit("CsFit", "R+ll");
-		
-		PEAKS[i].Cs.mu = CsFit->GetParameter(1);
-		PEAKS[i].Cs.muErr = CsFit->GetParError(1);
-		PEAKS[i].Cs.sigma = CsFit->GetParameter(2);
-		PEAKS[i].Cs.sigmaErr = CsFit->GetParError(2);
-		PEAKS[i].Cs.count = CsFit->GetParameter(0);
-
-		Float_t range = PEAKS[i].Tl.mu + 0.15 * PEAKS[i].Tl.mu;
+		Float_t range = 1.15 * PEAKS[i].getHighestEnergyPeak().mu;
+		PLOTS[i].raw = analyzer->getPlot();
 		PLOTS[i].raw->GetXaxis()->SetRangeUser(0, range);
-		NUMBINS = 10000;	
 
 		// Collecting data:
-		Double_t expE[3] = {2615.0, 1460.0, 661.6};
-		Double_t fitE[3]; 
-			fitE[0] = PEAKS[i].Tl.mu;
-			fitE[1] = PEAKS[i].K.mu;
-			fitE[2] = PEAKS[i].Cs.mu;
-		Double_t fitEErr[3];
-			fitEErr[0] = PEAKS[i].Tl.muErr;
-			fitEErr[1] = PEAKS[i].K.muErr;
-			fitEErr[2] = PEAKS[i].Cs.muErr;
-		Double_t fitSigma[3];
-			fitSigma[0] = PEAKS[i].Tl.sigma / PEAKS[i].Tl.mu;
-			fitSigma[1] = PEAKS[i].K.sigma / PEAKS[i].K.mu;
-			fitSigma[2] = PEAKS[i].Cs.sigma / PEAKS[i].Cs.mu;
-		Double_t fitSigmaErr[3];
-			fitSigmaErr[0] = PEAKS[i].Tl.sigmaErr / PEAKS[i].Tl.mu;
-			fitSigmaErr[1] = PEAKS[i].K.sigmaErr / PEAKS[i].K.mu;
-			fitSigmaErr[2] = PEAKS[i].Cs.sigmaErr / PEAKS[i].Cs.mu;
-		PLOTS[i].calPlot = new TGraphErrors(3, expE, fitE, 0, fitEErr);
+		vector<Double_t> fitE;
+		vector<Double_t> fitEErr;
+		vector<Double_t> fitSigmaErr;
+		vector<Double_t> fitSigma;
+		for (Int_t j = 0; j < allPeakEnergies.size(); j++) {
+			PeakInfo currPeak = PEAKS[i].get(allPeakEnergies[j]);
+			fitE.push_back(currPeak.mu);
+			fitEErr.push_back(currPeak.muErr);
+			fitSigma.push_back(currPeak.sigma / currPeak.mu);
+			fitSigmaErr.push_back(currPeak.sigmaErr / currPeak.mu);
+		} 
+
+		PLOTS[i].calPlot = new TGraphErrors(allPeakEnergies.size(), &allPeakEnergies[0], &fitE[0], 0, &fitEErr[0]);
 		PLOTS[i].calPlot->SetTitle(getLabels(mode, i).c_str());
 		PLOTS[i].calPlot->SetMarkerColor(i+1);
 		if (i == 4) {PLOTS[i].calPlot->SetMarkerColor(i+2);}
@@ -358,7 +551,7 @@ void Calibration(string mode, string option) {
 		PLOTS[i].calPlot->SetLineColor(1);
 		PLOTS[i].calPlot->SetLineWidth(2);		
 		
-		PLOTS[i].sigmaPlot = new TGraphErrors(3, expE, fitSigma, 0, fitSigmaErr); 
+		PLOTS[i].sigmaPlot = new TGraphErrors(allPeakEnergies.size(), &allPeakEnergies[0], &fitSigma[0], 0, &fitSigmaErr[0]); 
 		PLOTS[i].sigmaPlot->SetTitle(getLabels(mode, i).c_str());
 		PLOTS[i].sigmaPlot->SetMarkerColor(i+1);
 		PLOTS[i].sigmaPlot->SetLineColor(1);
@@ -366,7 +559,7 @@ void Calibration(string mode, string option) {
 		PLOTS[i].sigmaPlot->SetMarkerStyle(21);
 		PLOTS[i].sigmaPlot->SetLineWidth(1);
 		
-		TF1 *calibrationFit = new TF1("calibrationFit", "pol1", 0, overflowBin);
+		TF1 *calibrationFit = new TF1("calibrationFit", "pol1", 0, analyzer->getOverflowPos());
 		PLOTS[i].calPlot->Fit("calibrationFit", "", "", 0, 0);
 		
 		RESULTS[i].calPars.slope = calibrationFit->GetParameter(1);
@@ -378,7 +571,7 @@ void Calibration(string mode, string option) {
 
 		string calName = "calibrated" + to_string(i);
 		string label = getLabels(mode, i);
-		Int_t maxCalBin = (overflowBin - RESULTS[i].calPars.offset) / 
+		Int_t maxCalBin = (analyzer->getOverflowPos() - RESULTS[i].calPars.offset) / 
 		                   RESULTS[i].calPars.slope;
 		PLOTS[i].calibrated = new TH1D(calName.c_str(), label.c_str(), 20e3, 0, maxCalBin);
 		PLOTS[i].calibrated->SetLineColor(i+1);
@@ -394,7 +587,7 @@ void Calibration(string mode, string option) {
 		Int_t rateCount;
 		Int_t rateBin = PLOTS[i].calibrated->FindBin(50);
 		while (rateBin > 0) {
-			rateCount += PLOTS[i].calibrated->GetBinCotent(rateBin);
+			rateCount += PLOTS[i].calibrated->GetBinContent(rateBin);
 			rateCount--;
 		}
 		RESULTS[i].lowERate = (Double_t) rateCount / (Double_t) time;
@@ -413,14 +606,18 @@ void Calibration(string mode, string option) {
 		cout << "Noise Wall at: " << RESULTS[i].noiseWall << " keV" << endl;
 		
 		cout << endl;
-		cout << "---------------------------------------------------------------" << endl;
+		cout << "-------------------------------------------------------------" << endl;
 		cout << endl;
 
 	}
 
-	//////// BEGIN MODE HANDLING ////////
+/*
+   #####################
+   #   MODE HANDLING   #
+   #####################
+*/
 
-	if (mode == "fir") {
+/*	if (mode == "fir") {
 
 		TCanvas *FIRCanvas = new TCanvas("FIR", "FIR", 1);
 		Double_t peakingTimes[NUMFILES];
@@ -440,9 +637,10 @@ void Calibration(string mode, string option) {
 		FIROptPlot->Draw();
 		//cout << "OPTIMAL PEAKING TIME: " << OptPeakingTime << endl;
 
-	} else if (mode == "pos") {
+	} else */
+	if (mode == "pos") {
 
-		Double_t resolution = PEAKS[3].K.sigma / PEAKS[3].K.mu;
+		Double_t resolution = PEAKS[3].get(1460.0).sigma / PEAKS[3].get(1460.0).mu;
 		cout << "Normalized detector resolution (width of Cs peak" << endl;
 		cout << " / mean at 3rd position):" << resolution << endl;
 		
@@ -451,10 +649,10 @@ void Calibration(string mode, string option) {
 		Double_t CsSig[NUMFILES];
 		Double_t CsSigErrs[NUMFILES];
 		for (Int_t k = 0; k < NUMFILES; k++) {
-			CsPos[k] = PEAKS[k].K.mu;
-			CsPosErrs[k] = PEAKS[k].K.muErr;
-			CsSig[k] = PEAKS[k].K.sigma / PEAKS[k].K.mu;
-			CsSigErrs[k] = PEAKS[k].K.sigmaErr / PEAKS[k].K.mu;
+			CsPos[k] = PEAKS[k].get(1460.0).mu;
+			CsPosErrs[k] = PEAKS[k].get(1460.0).muErr;
+			CsSig[k] = PEAKS[k].get(1460.0).sigma / PEAKS[k].get(1460.0).mu;
+			CsSigErrs[k] = PEAKS[k].get(1460.0).sigmaErr / PEAKS[k].get(1460.0).mu;
 		}
 
 		Double_t xAxis[NUMFILES];
@@ -464,7 +662,7 @@ void Calibration(string mode, string option) {
 			} else if (mode == "volt") {
 				xAxis[i] = VOLTAGES[i];
 			} else if (mode == "fir") {
-				xAxis[i] = PEAKINGTIMES[i];
+				//xAxis[i] = PEAKINGTIMES[i];
 			}
 		}
 		
@@ -473,7 +671,7 @@ void Calibration(string mode, string option) {
 		CsPosGraph->SetTitle(("Cs Peak Energy vs " + getDepVar(mode)).c_str());
 		CsPosGraph->GetXaxis()->SetTitle(getDepVar(mode).c_str());
 		CsPosGraph->GetYaxis()->SetTitle("Uncalibrated Cs Peak Energy");
-		
+	
 		formatGraph(CsPosGraph);
 		/*CsPosGraph->SetMarkerColor(4);
 		CsPosGraph->SetMarkerStyle(21);
@@ -506,9 +704,11 @@ void Calibration(string mode, string option) {
 		
 	}
 
-	//////// END MODE HANDLING ////////
-
-	//////// BEGIN OPTION HANDLING ////////
+/*
+   #######################
+   #   OPTION HANDLING   #
+   #######################
+*/
 
 	if (option == "cal") {	
 		
@@ -545,15 +745,15 @@ void Calibration(string mode, string option) {
 		for (Int_t k = 0; k < NUMFILES; k++) {
 			Double_t residues[3];
 			
-			Double_t energy = (PEAKS[k].Tl.mu - RESULTS[k].calPars.offset) / 
-			              RESULTS[k].calPars.slope;
+			Double_t energy = (PEAKS[k].get(2615.0).mu - RESULTS[k].calPars.offset)
+			                   / RESULTS[k].calPars.slope;
 			residues[0] = 100 * (energy - expE[0]) / expE[0];
 				
-			energy = (PEAKS[k].K.mu - RESULTS[k].calPars.offset) / 
+			energy = (PEAKS[k].get(1460.0).mu - RESULTS[k].calPars.offset) / 
 			          RESULTS[k].calPars.slope;
 			residues[1] = 100 * (energy - expE[1]) / expE[1];			
 			
-			energy = (PEAKS[k].Cs.mu - RESULTS[k].calPars.offset) / 
+			energy = (PEAKS[k].get(661.6).mu - RESULTS[k].calPars.offset) / 
 			          RESULTS[k].calPars.slope;
 			residues[2] = 100 * (energy - expE[2]) / expE[2];
 			
@@ -592,7 +792,7 @@ void Calibration(string mode, string option) {
 			} else if (mode == "volt") {
 				xAxis[i] = VOLTAGES[i];
 			} else if (mode == "fir") {
-				xAxis[i] = PEAKINGTIMES[i];
+				//xAxis[i] = PEAKINGTIMES[i];
 			}
 		}
 		
@@ -643,7 +843,7 @@ void Calibration(string mode, string option) {
 			} else if (mode == "volt") {
 				xAxis[i] = VOLTAGES[i];
 			} else if (mode == "fir") {
-				xAxis[i] = PEAKINGTIMES[i];
+				//xAxis[i] = PEAKINGTIMES[i];
 			}
 		}
 		
@@ -652,6 +852,7 @@ void Calibration(string mode, string option) {
 		noiseGraph->SetTitle(("Noise Wall Energy vs " + getDepVar(mode)).c_str());
 		noiseGraph->GetXaxis()->SetTitle(getDepVar(mode).c_str());
 		noiseGraph->GetYaxis()->SetTitle("Noise Wall Energy (keV)");
+
 		/*NoiseGraph->SetMarkerColor(4);
 		NoiseGraph->SetMarkerStyle(21);
 		NoiseGraph->SetLineColor(1);
@@ -668,7 +869,7 @@ void Calibration(string mode, string option) {
 		}
 		
 	} else if (option == "backFits") {
-		
+		/*
 		TCanvas *backCanvas = new TCanvas("backCanvas", "Background Fits", 1400, 900);
 		backCanvas->Divide(3, 5);
 		for (Int_t i = 0; i < 5; i++) {
@@ -678,13 +879,14 @@ void Calibration(string mode, string option) {
 			PLOTS[i].backPlots.K->Draw();
 			backCanvas->cd(3*i+3);
 			PLOTS[i].backPlots.Cs->Draw();
-		}
+		}*/
 
 	} else if (option == "AE") {
 		
 		TCanvas *AECanvas = new TCanvas("AECanvas", "A/E Plot", 1);
 		// Figure out how to do mathematical manipulations on a TChain, then I can sum
 		// all our data.
+
 		/*TChain summed = new TChain("st");
 		for (Int_t i = 0; i < NUMFILES; i++) {
 			summed.Add((data[i] - RESULTS[i].calPars.offset) / );
@@ -719,6 +921,7 @@ void Calibration(string mode, string option) {
 	} else if (option == "muon") {
 		// muons at about 10x Tl peak position.
 		// if it fails, get results and set to unphysical estimates;
+
 		/*
 		TCanvas *muonCanvas = new TCanvas("muonCanvas", "Muon Canvas", 1);
 		TH1D *muonHist = new TH1D("muonHist", "Muon Peak", "
@@ -735,31 +938,32 @@ void getData(TChain *data[NUMFILES], string mode) {
 	string path[NUMFILES];
 	if (mode == "pos") {
 		cout << "Finding Position Data..." << endl;
-		path[0] = "Position/1/NaI_ET_run*";
-		path[1] = "Position/2/NaI_ET_run*";
-		path[2] = "Position/3/NaI_ET_run*";
-		path[3] = "Position/4/NaI_ET_run*";
-		path[4] = "Position/5/NaI_ET_run*";
+		path[0] = "position/position_1/NaI_ET_run*";
+		path[1] = "position/position_2/NaI_ET_run*";
+		path[2] = "position/position_3/NaI_ET_run*";
+		path[3] = "position/position_4/NaI_ET_run*";
+		path[4] = "position/position_5/NaI_ET_run*";
 	} else if (mode == "volt") {
 		cout << "Finding Voltage Data..." << endl;
-		path[0] = "Voltage/750V/NaI_ET_run*";
-		path[1] = "Voltage/810V/NaI_ET_run*";
-		path[2] = "Voltage/870V/NaI_ET_run*";
-		path[3] = "Voltage/930V/NaI_ET_run*";
-		path[4] = "Voltage/990V/NaI_ET_run*";
+		path[0] = "voltage/600_V/NaI_ET_run*";
+		path[1] = "voltage/700_V/NaI_ET_run*";
+		path[2] = "voltage/800_V/NaI_ET_run*";
+		path[3] = "voltage/900_V/NaI_ET_run*";
+		path[4] = "voltage/1000_V/NaI_ET_run*";
 	} else if (mode == "fir") {
 		cout << "Finding FIR Data..." << endl;
-		path[0] = "FIR/1/NaI_ET_run*";
-		path[1] = "FIR/2/NaI_ET_run*";
-		path[2] = "FIR/3/NaI_ET_run*";
-		path[3] = "FIR/4/NaI_ET_run*";
-		path[4] = "FIR/5/NaI_ET_run*";
+		path[0] = "fir/fir_1_lowest/NaI_ET_run*";
+		path[1] = "fir/fir_2/NaI_ET_run*";
+		path[2] = "fir/fir_3/NaI_ET_run*";
+		path[3] = "fir/fir_4/NaI_ET_run*";
+		path[4] = "fir/fir_5_highest/NaI_ET_run*";
 	}
 	
 	for (Int_t i = 0; i < NUMFILES; i++) {
 		data[i] = new TChain("st");
 		data[i]->Add(path[i].c_str());
 	}
+	cout << "Data successfully loaded" << endl;
 }
 
 Double_t getRunTime(TChain *data, string mode) {
@@ -771,34 +975,9 @@ Double_t getRunTime(TChain *data, string mode) {
 	}
 	return time;
 }
-
-Double_t snapToMax(TH1D *h, FitWindow win) {
-	h->GetXaxis()->SetRangeUser(win.low, win.high);
-	Double_t pos = h->GetXaxis()->GetBinCenter(h->GetMaximumBin());
-	h->GetXaxis()->SetRange(0, NUMBINS);
-	return pos;
-}
-
-FitPars backEst(TH1D *h, FitWindow win, Double_t coverage, string func, string peak, Int_t i) {
+/*
+FitResults backEst(TH1D *h, FitWindow win, Double_t coverage, string func, string peak, Int_t i) {
 	cout << "Estimating Background..." << endl;
-
-	// This would be if you wanted to do an asymmetric fit or something
-	/*FitWindow lowWindow;
-	lowWindow.low = win.low;
-	lowWindow.high = win.low + 0.1 * win.low;
-	Int_t lowWindowLowBin = h->FindBin(lowWindow.low);
-	Int_t lowWindowHighBin = h->FindBin(lowWindow.high);
-	Int_t lowWindowBinRange = lowWindowHighBin - lowWindowLowBin;
-
-	FitWindow highWindow;
-	highWindow.low = win.high - 0.1 * win.high;
-	highWindow.high = win.high;
-	Int_t highWindowLowBin = h->FindBin(highWindow.low);
-	Int_t highWindowHighBin = h->FindBin(highWindow.high);
-	Int_t highWindowBinRange = highWindowHighBin - highWindowLowBin;
-	
-	Float_t backVals[lowWindowBinRange + highWindowBinRange];
-	Float_t backPos[lowWindowBinRange + highWindowBinRange];*/
 
 	Int_t lowBin = h->FindBin(win.low);
 	Int_t highBin = h->FindBin(win.high);
@@ -821,7 +1000,7 @@ FitPars backEst(TH1D *h, FitWindow win, Double_t coverage, string func, string p
 	TF1 backFit = TF1("backFit", func.c_str(), win.low, win.high);
 	backGraph->Fit("backFit");
 
-	FitPars pars;
+	FitResults pars;
 	pars.offset = backFit.GetParameter(0);
 	pars.slope = backFit.GetParameter(1);
 	
@@ -841,7 +1020,7 @@ FitPars backEst(TH1D *h, FitWindow win, Double_t coverage, string func, string p
 	}
 
 	return pars;
-}
+}*/
 
 string getDepVar(string mode) {
 	if (mode == "pos") {
@@ -860,7 +1039,7 @@ string getLabels(string mode, Int_t index) {
 	} else if (mode == "volt") {
 		return to_string(VOLTAGES[index]) + " V";
 	} else if (mode == "fir") {
-		return "Peaking Time: " + to_string(PEAKINGTIMES[index]);
+		//return "Peaking Time: " + to_string(PEAKINGTIMES[index]);
 	}
 	return "error in getLabels: bad mode";
 }
