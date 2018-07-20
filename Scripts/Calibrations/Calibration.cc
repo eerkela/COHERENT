@@ -13,6 +13,7 @@
 #include <TMultiGraph.h>
 #include <TH2D.h>
 #include <stdexcept>
+#include <TLine.h>
 
 /*
 This script (built using the ROOT Data Analysis Framework from CERN) will analyze a 
@@ -86,6 +87,8 @@ Notes and TODO:
 
 using namespace std;
 
+TApplication* app = new TRint("app", 0, NULL);
+
 /*
    ###################
    #     STRUCTS     #
@@ -146,11 +149,15 @@ struct Results {
 */
 
 class PeakSet {
+// This is a custom data structure emulating the behavior of a set of PeakInfo structs.  The set is
+// searchable by peak energy and will never contain two peaks with the same energy.
 private:
 	vector<PeakInfo> peakPars;
 
 public:
 	PeakSet(vector<Double_t> energies) {
+	// Constructor: makes a new set of PeakInfo structs from a vector of energies.  All
+	// paramaters of the contained PeakInfo structs besides energy are initialized to null.
 		for(Int_t i = 0; i < energies.size(); i++) {
 			PeakInfo curr;
 			curr.energy = energies[i];
@@ -158,11 +165,11 @@ public:
 		}
 	}
 	
-	PeakSet() {
-		// do nothing.  PeakPars will be a vector with no elements.
-	}
+	PeakSet() {}
+	// Standard Constructor: creates a PeakSet with no elements.
 
 	void put(PeakInfo info) {
+	// puts a new PeakInfo struct into the set or updates it if it already exists
 		Int_t index = this->indexOf(info.energy);
 		if (index == -1) {
 			this->peakPars.push_back(info);
@@ -176,6 +183,7 @@ public:
 	}
 
 	PeakInfo get(Double_t energy) {
+	// returns the PeakInfo struct in the set with the specified energy
 		Int_t index = this->indexOf(energy);
 		if (index == -1) {
 			throw invalid_argument("peak not in set: " + to_string(energy) + " keV");
@@ -184,6 +192,8 @@ public:
 	}
 
 	PeakInfo getHighestEnergyPeak() {
+	// returns the PeakInfo for the highest energy peak.  This is useful because the highest
+	// energy peak must be pinned to allow for linear extrapolation of other peaks.
 		PeakInfo max;
 		for (Int_t i = 0; i < this->peakPars.size(); i++) {
 			PeakInfo curr = this->peakPars[i];
@@ -195,6 +205,7 @@ public:
 	}
 
 	Int_t indexOf(Double_t energy) {
+	// returns index of the PeakInfo struct with the specified energy (returns -1 if not present)
 		for (Int_t i = 0; i < this->peakPars.size(); i++) {
 			PeakInfo curr = this->peakPars[i];
 			if (curr.energy == energy) {
@@ -206,6 +217,7 @@ public:
 	}
 
 	bool contains(Double_t energy) {
+	// returns true if a PeakInfo struct exists in the set with the specified energy
 		return this->indexOf(energy) != -1;
 	}
 
@@ -214,7 +226,6 @@ public:
 	}
 };
 
-
 /*
    ######################
    #     PEAKFINDER     #
@@ -222,8 +233,8 @@ public:
 */
 
 class PeakFinder {
-// This class describes a set of PeakInfo structs that is searchable by their energies.
-// An object of this type will house all the pertinent info collected for each peak
+// This class describes the analysis engine itself, which handles all the heavy lifting of the 
+// characterization program.  
 private:
 	TChain *data;
 	TH1D *plot;
@@ -233,19 +244,31 @@ private:
 	PeakSet peaks;
 	PeakInfo pinnedPeak;
 
-	//TApplication* app;
-
 	Double_t snapToMax(TH1D *h, Int_t pos, Double_t low, Double_t high) {
 		h->GetXaxis()->SetRangeUser(low, high);
 		Double_t maxPos = h->GetXaxis()->GetBinCenter(h->GetMaximumBin());
 		h->GetXaxis()->SetRangeUser(0, this->getOverflowPos());
 		return maxPos;
 	}
+
+	bool isNumber(string input) {
+		for (Int_t i = 0; i < input.length(); i++) {
+			char c = input[i];
+			if (!isdigit(c)) {
+				return false;
+			}
+		}
+		return input.length() != 0;
+	}
 	
 public:
 	PeakFinder(TChain *c, PeakSet peaks, Double_t time, string channel) {
-		// give me a vector of energies sorted in the order they will be searched in.
-		//this->app = new TRint("app", 0, NULL);
+	// Constructor: takes in a data chain c, a PeakSet containing each of the peaks to be
+	// analyzed, the total time within the data run, and the channel to be used.  This
+	// constructor then draws an initial histogram to guess the location of the highest energy 
+	// peak, asks for user confirmation/override, then redraws the final histogram with a 
+	// guaranteed 500 bins below the confirmed highest energy peak position.  This is done to 
+	// enhance fit quality.
 		this->data = c;
 		this->time = time;
 		this->channel = channel;
@@ -261,17 +284,23 @@ public:
 
 		Int_t binNum = numBins;
 		Int_t count = 0;
-		while ((Double_t) count < 9.0 * time && binNum > 0) {
+		while ((Double_t) count < 5.6 * time && binNum > 0) {
 			count += (Int_t) hTemp->GetBinContent(binNum);
 			binNum--;
 		}
 		Double_t pos = hTemp->GetXaxis()->GetBinCenter(binNum);
 		pos = this->snapToMax(hTemp, pos, 0.95 * (Double_t) pos, 1.05 * (Double_t) pos);
 		hTemp->Draw();
+		
+		hTemp->GetXaxis()->SetRangeUser(0, 2 * pos);
+		TLine *line = new TLine(pos, 0, pos, hTemp->GetBinContent(hTemp->GetMaximumBin()));
+		line->SetLineColor(kRed);
+		line->Draw();
 
 		cout << "VISUAL CHECK" << endl;
 		cout << "estimated position for highest energy peak: " << pos << endl;
-		//this->app->Run(true);
+		cout << "(type .q to continue)" << endl;
+		app->Run(true);
 		cout << "does this make sense? (y/n) ";
 		string response;
 		cin >> response;
@@ -284,11 +313,16 @@ public:
 		}
 		if (response == "n") {
 			cout << "new peak position: ";
-			cin >> pos;
+			cin >> response;
+			while (!this->isNumber(response)) {
+				cout << "error: response \"" + response + "\" isn't a number" << endl;
+				cout << "new peak position: ";
+				cin >> response;
+			}
+			pos = stod(response);
 			pos = this->snapToMax(hTemp, pos, 0.95 * pos, 1.05 * pos);
 		}
-		delete hTemp;
-		delete tempCanvas;
+		tempCanvas->Close();
 
 		Double_t normPos = pos / overflowPos;
 		
@@ -303,16 +337,18 @@ public:
 		firstPeakInfo.count = h->GetBinContent(h->FindBin(pos));
 		this->pinnedPeak = firstPeakInfo;
 		this->peaks.put(firstPeakInfo);
+
+		delete hTemp;
 	}
 
-	Int_t findPeak(Double_t energy) {
+	Double_t findPeak(Double_t energy) {
+	// Estimates a peak's location by linear extrapolation from the confirmed location of the
+	// highest energy peak as found in the constructor above.  This function then snaps the
+	// estimate to the local maximum within +-5% of the estimated position and returns the 
+	// corresponding position as a final estimate.
 		Double_t pinnedEnergy = this->pinnedPeak.energy;
 		Double_t pinnedPosition = this->pinnedPeak.mu;
 		Double_t scaleFactor = pinnedPosition / pinnedEnergy;
-
-		//cout << "pinnedEnergy: " << pinnedEnergy << endl;
-		//cout << "pinnedPosition: " << pinnedPosition << endl;
-		//cout << "Scale Factor: " << scaleFactor << endl;
 		
 		Double_t pos = energy * scaleFactor;
 		cout << "Estimated position: " << pos << endl;
@@ -321,11 +357,24 @@ public:
 		PeakInfo peak = this->peaks.get(energy);
 		peak.mu = pos;
 		peak.count = this->plot->GetBinContent(this->plot->FindBin(pos));
+		this->peaks.put(peak);
 
 		return pos;
 	}
 
 	FitResults backEst(FitWindow win, Double_t range, string fitFunc) {
+	// This function provides an estimate of the background underneath a peak by counting
+	// inwards from the edges of the provided FitWindow.  It first translates the window's edges
+	// into bin numbers, then counts inwards from the window edges a number of bins determined
+	// by the provided range parameter.  It pushes the contents of these counted bins into a
+	// TGraph, whereupon they may be fit according to the supplied fitFunc, the results of
+	// which are returned as a FitResults struct.
+
+	// The range parameter works as a proportion of the provided window to be considered in
+	// background estimation.  1.00 means 100% of the window will be included in the background
+	// estimation and 0.00 means none will.  This number should be chosen to maximize the number
+	// of points considered in the background fit, but should not include data from the peak 
+	// itself.
 		TH1D *h = this->plot;
 		
 		Int_t lowBin = h->FindBin(win.low);
@@ -360,13 +409,17 @@ public:
 		backGraph->SetMarkerStyle(4);
 		backGraph->SetMarkerSize(0.5);
 
-		backGraph->Draw();
-		delete backGraph;
+		//backGraph->Draw();
+		//delete backGraph;
 		return pars;
 	}
 
 	void fit(vector<Double_t> energies, FitWindow win, string fitFunc, 
 	         vector<Double_t> pars, Double_t backRange) {
+	// This function provides a fit to a region specified by the provided FitWindow.  It 
+	// automatically estimates background and can fit multiple peaks at once if necessary.
+	// The user must supply energies and initial guesses for each peak to be fitted.
+		TCanvas *c = new TCanvas("c", "c", 1);
 		TH1D *h = this->plot;
 		Int_t pos = this->findPeak(energies[0]);
 		Int_t count = h->GetBinContent(h->FindBin(pos));
@@ -382,7 +435,9 @@ public:
 		
 		TF1 *fit = new TF1("fit", fitFunc.c_str(), win.low, win.high);
 		fit->SetParameters(parArray);
-		h->Fit("fit", "R+ll");
+		h->Fit(fit, "R+ll");
+		h->Draw();
+		gPad->SetLogy();
 
 		for (Int_t i = 0; i < energies.size(); i++) {
 			PeakInfo curr;
@@ -398,14 +453,17 @@ public:
 	}
 
 	Double_t getOverflowPos() {
+	// returns the maximum uncalibrated position contained in the main histogram.
 		return 1.01 * this->data->GetMaximum("energy");
 	}
 
 	PeakSet getPeakSet() {
+	// returns the PeakSet being used by this PeakFinder.
 		return this->peaks;
 	}
 
 	TH1D* getPlot() {
+	// returns the main histogram drawn for this PeakFinder
 		return this->plot;
 	}
 
@@ -443,22 +501,22 @@ void Calibration(string mode, string option) {
 	fitCanvas->Divide(2, 3);
 	TChain *data[NUMFILES]; 
 	getData(data, mode);
-	string channel = "channel==4";
+	string channel = "channel==4"; // channel to use goes here.
 	vector<FitInfo> fitPars;
 
 	// Tl peak parameters:
 	FitInfo TlPars;
 	TlPars.peakEnergies.push_back(2615.0);
-	TlPars.fitFunc = "[0] * exp(-0.5 * ((x - [1]) / 0.05 * [2])^2) + exp([3] + [4] * x)";
-	TlPars.fitWindow.low = 0.9;
-	TlPars.fitWindow.high = 1.1;
-	TlPars.backgroundRange = 0.3;
+	TlPars.fitFunc = "[0] * exp(-0.5 * ((x - [1]) / [2])^2) + exp([3] + [4] * x)";
+	TlPars.fitWindow.low = 0.9; // window limits are proportions of mean position of first peak
+	TlPars.fitWindow.high = 1.1; // i.e. 1.1 times peak mu
+	TlPars.backgroundRange = 0.3; // proportion of window to be considered in background est.
 	fitPars.push_back(TlPars);
 	
 	// K peak parameters:
 	FitInfo KPars;
 	KPars.peakEnergies.push_back(1460.0);
-	KPars.fitFunc = "[0] * exp(-0.5 * ((x - [1]) / 0.05 * [2])^2) + exp([3] + [4] * x)";
+	KPars.fitFunc = "[0] * exp(-0.5 * ((x - [1]) / [2])^2) + exp([3] + [4] * x)";
 	KPars.fitWindow.low = 0.85;
 	KPars.fitWindow.high = 1.15;
 	KPars.backgroundRange = 0.3;
@@ -467,7 +525,7 @@ void Calibration(string mode, string option) {
 	// Cs peak parameters:
 	FitInfo CsPars;
 	CsPars.peakEnergies.push_back(661.6);
-	CsPars.fitFunc = "[0] * exp(-0.5 * ((x - [1]) / 0.05 * [2])^2) + exp([3] + [4] * x)";
+	CsPars.fitFunc = "[0] * exp(-0.5 * ((x - [1]) / [2])^2) + exp([3] + [4] * x)";
 	CsPars.fitWindow.low = 0.8;
 	CsPars.fitWindow.high = 1.2;
 	CsPars.backgroundRange = 0.3;
@@ -485,6 +543,8 @@ void Calibration(string mode, string option) {
 		Double_t time = getRunTime(data[i], mode);
 		cout << "Run time in data chain: " << time << " seconds" << endl;
 
+		// Need to make an initial PeakSet to bind to the analyzer engine.  Simultaneously
+		// generates a vector with all the energies of all the peaks to be considered.
 		PeakSet allPeaks;
 		vector<Double_t> allPeakEnergies;
 		for (Int_t j = 0; j < fitPars.size(); j++) {
@@ -501,10 +561,14 @@ void Calibration(string mode, string option) {
 		for (Int_t j = 0; j < fitPars.size(); j++) {
 			FitInfo pars = fitPars[j];
 
-			PeakInfo estimate = analyzer->getPeakSet().get(pars.peakEnergies[0]);
-			FitWindow actualWin;
+			Double_t energy = pars.peakEnergies[0];
+			analyzer->findPeak(energy);
+			PeakInfo estimate = analyzer->getPeakSet().get(energy);
+
+			FitWindow actualWin; // scale window by estimated peak position
 			actualWin.low = pars.fitWindow.low * estimate.mu;
 			actualWin.high = pars.fitWindow.high * estimate.mu;
+			cout << "estimated peak position: " << estimate.mu << endl;
 
 			Int_t numPars = 0;  // counting # of pars needed in fit
 			for (Int_t k = 0; k < pars.fitFunc.length(); k++) {
@@ -516,21 +580,21 @@ void Calibration(string mode, string option) {
 			
 			vector<Double_t> initialGuesses;
 			for (Int_t k = 0; k < numPars / 3; k++) {
-				initialGuesses.push_back(estimate.count);
-				initialGuesses.push_back(estimate.mu);
-				initialGuesses.push_back(estimate.mu);
+				initialGuesses.push_back(estimate.count); // height
+				initialGuesses.push_back(estimate.mu); // mean position
+				initialGuesses.push_back(0.05 * estimate.mu); // variance
 			}
 			
 			analyzer->fit(pars.peakEnergies, actualWin, pars.fitFunc,
                                       initialGuesses, pars.backgroundRange);
 		}
-		PEAKS[i] = analyzer->getPeakSet();
+		PEAKS[i] = analyzer->getPeakSet(); // saves PeakSet for later use.
 
 		Float_t range = 1.15 * PEAKS[i].getHighestEnergyPeak().mu;
 		PLOTS[i].raw = analyzer->getPlot();
 		PLOTS[i].raw->GetXaxis()->SetRangeUser(0, range);
 
-		// Collecting data:
+		// Retrieving data on each peak for further plotting:
 		vector<Double_t> fitE;
 		vector<Double_t> fitEErr;
 		vector<Double_t> fitSigmaErr;
@@ -588,7 +652,7 @@ void Calibration(string mode, string option) {
 		Int_t rateBin = PLOTS[i].calibrated->FindBin(50);
 		while (rateBin > 0) {
 			rateCount += PLOTS[i].calibrated->GetBinContent(rateBin);
-			rateCount--;
+			rateBin--;
 		}
 		RESULTS[i].lowERate = (Double_t) rateCount / (Double_t) time;
 		cout << "Rate below 50 keV: " << RESULTS[i].lowERate << endl;
@@ -596,11 +660,10 @@ void Calibration(string mode, string option) {
 		Int_t noiseCount;
 		Int_t noiseBin = PLOTS[i].calibrated->FindBin(50);
 		Int_t noiseMin = 2 * PLOTS[i].calibrated->GetBinContent(noiseBin);
-		while (noiseCount < 2 * noiseMin) {
+		while (noiseCount < 2 * noiseMin && noiseBin > 0) {
 			noiseCount = PLOTS[i].calibrated->GetBinContent(noiseBin);
 			if (noiseCount < noiseMin) {noiseMin = noiseCount;}
 			noiseBin--;
-			if (noiseBin == 0) {break;}
 		}
 		RESULTS[i].noiseWall = PLOTS[i].calibrated->GetXaxis()->GetBinCenter(noiseBin);
 		cout << "Noise Wall at: " << RESULTS[i].noiseWall << " keV" << endl;
@@ -609,6 +672,7 @@ void Calibration(string mode, string option) {
 		cout << "-------------------------------------------------------------" << endl;
 		cout << endl;
 
+		delete analyzer;
 	}
 
 /*
@@ -640,7 +704,9 @@ void Calibration(string mode, string option) {
 	} else */
 	if (mode == "pos") {
 
-		Double_t resolution = PEAKS[3].get(1460.0).sigma / PEAKS[3].get(1460.0).mu;
+		Double_t CsEnergy = 661.6;
+
+		Double_t resolution = PEAKS[3].get(CsEnergy).sigma / PEAKS[3].get(CsEnergy).mu;
 		cout << "Normalized detector resolution (width of Cs peak" << endl;
 		cout << " / mean at 3rd position):" << resolution << endl;
 		
@@ -649,10 +715,10 @@ void Calibration(string mode, string option) {
 		Double_t CsSig[NUMFILES];
 		Double_t CsSigErrs[NUMFILES];
 		for (Int_t k = 0; k < NUMFILES; k++) {
-			CsPos[k] = PEAKS[k].get(1460.0).mu;
-			CsPosErrs[k] = PEAKS[k].get(1460.0).muErr;
-			CsSig[k] = PEAKS[k].get(1460.0).sigma / PEAKS[k].get(1460.0).mu;
-			CsSigErrs[k] = PEAKS[k].get(1460.0).sigmaErr / PEAKS[k].get(1460.0).mu;
+			CsPos[k] = PEAKS[k].get(CsEnergy).mu;
+			CsPosErrs[k] = PEAKS[k].get(CsEnergy).muErr;
+			CsSig[k] = PEAKS[k].get(CsEnergy).sigma / CsPos[k];
+			CsSigErrs[k] = PEAKS[k].get(CsEnergy).sigmaErr / CsPos[k];
 		}
 
 		Double_t xAxis[NUMFILES];
@@ -701,7 +767,8 @@ void Calibration(string mode, string option) {
 		CsResCanvas->Print("CsResvsPos.pdf[");
 		CsResCanvas->Print("CsResvsPos.pdf");
 		CsResCanvas->Print("CsResvsPos.pdf]");
-		
+
+		//app->Run(true);
 	}
 
 /*
@@ -933,6 +1000,8 @@ void Calibration(string mode, string option) {
 }
 
 void getData(TChain *data[NUMFILES], string mode) {
+// populates the passed data chains with appropriate data given the specified mode.  Only works with
+// directory structure as specified in the University of Washington characterization protocol.
 	cout << "Getting Data..." << endl;
 	
 	string path[NUMFILES];
@@ -967,6 +1036,7 @@ void getData(TChain *data[NUMFILES], string mode) {
 }
 
 Double_t getRunTime(TChain *data, string mode) {
+// returns the time in seconds contained in the supplied data chain.
 	Double_t time;
 	if (mode == "fir") {
 		time = (Double_t) data->GetNtrees() * 300;
@@ -1023,6 +1093,7 @@ FitResults backEst(TH1D *h, FitWindow win, Double_t coverage, string func, strin
 }*/
 
 string getDepVar(string mode) {
+// returns the name of the dependent variable in a run (for plotting purposes)
 	if (mode == "pos") {
 		return "Position";
 	} else if (mode == "volt") {
@@ -1034,6 +1105,7 @@ string getDepVar(string mode) {
 }
 
 string getLabels(string mode, Int_t index) {
+// returns the labels required to build a legend in an overlaid comparison plot
 	if (mode == "pos") {
 		return "Position " + to_string(POSITIONS[index]);
 	} else if (mode == "volt") {
@@ -1045,10 +1117,22 @@ string getLabels(string mode, Int_t index) {
 }
 
 void formatGraph(TGraphErrors *graph) {
+// general graph styling to not be so redundant
 	graph->SetMarkerColor(4);
 	graph->SetMarkerStyle(21);
 	graph->SetLineColor(1);
 	graph->SetLineWidth(2);
 	graph->GetYaxis()->SetTitleOffset(1.4);
 	graph->GetXaxis()->SetTitleOffset(1.2);
+}
+
+int main(int argc, char** argv) {
+	if(argc != 3) {
+		cout << "Invalid arguments. Must run with 2 arguments: mode and option" << endl;
+		cout << "See comment at start of Calibration.cc for more info" << endl;
+		return 1;
+	}
+
+	Calibration(argv[1], argv[2]);
+	return 0;
 }
