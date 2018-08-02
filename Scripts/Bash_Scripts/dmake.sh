@@ -14,28 +14,6 @@ then
 	mkdir $SERIAL_NUM
 fi
 
-
-# generatre FIR directories
-cd $DIR/$SERIAL_NUM
-if [ ! -d $DIR/$SERIAL_NUM/fir ]
-then 
-	echo "making FIR directory..."
-	mkdir fir
-else
-	echo "FIR directory already exists"
-fi
-cd fir
-for d in fir_1_lowest fir_2 fir_3 fir_4 fir_5_highest
-do
-	if [ ! -d $DIR/$SERIAL_NUM/$d ]
-	then
-		echo "making $d directory..."
-		mkdir $d
-	else
-		echo "$d directory already exists"
-	fi
-done
-
 # generate position directories
 cd $DIR/$SERIAL_NUM
 if [ ! -d $DIR/$SERIAL_NUM/position ]
