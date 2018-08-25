@@ -16,6 +16,7 @@ struct PeakInfo {
 	Double_t sigma;
 	Double_t sigmaErr;
 	Double_t count;
+	bool includeInCal;
 };
 
 struct FitResults {
@@ -32,6 +33,7 @@ struct FitInfo {
 	std::map<Int_t, ParWindow> fitParLimits;
 	ParWindow fitWindow;
 	Double_t backgroundRange;
+	std::vector<Double_t> excludeFromCal;
 };
 
 struct Measurement {
