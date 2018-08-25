@@ -40,17 +40,13 @@ void PeakSet::put(PeakInfo info) {
 	Int_t index = this->indexOf(info.energy);
 	if (index == -1) {
 		this->peakPars.push_back(info);
-		std::cout << std::endl;
-		std::cout << "put inserted new peak: peak " << this->peakPars.size() << std::endl;
-		std::cout << "energy: " << info.energy << std::endl;
-		std::cout << "positions: " << info.mu << std::endl;
-		std::cout << std::endl;
 	} else {
 		this->peakPars[index].mu = info.mu;
 		this->peakPars[index].muErr = info.muErr;
 		this->peakPars[index].sigma = info.sigma;
 		this->peakPars[index].sigmaErr = info.sigmaErr;
 		this->peakPars[index].count = info.count;
+		this->peakPars[index].includeInCal = info.includeInCal;
 	}
 }
 
@@ -67,17 +63,10 @@ PeakInfo PeakSet::getAtIndex(Int_t index) {
 	return this->peakPars[index];
 }
 
-PeakInfo PeakSet::getHighestEnergyPeak() {
+PeakInfo PeakSet::getFirstPeak() {
 	// returns the PeakInfo for the highest energy peak.  This is useful because the highest
 	// energy peak must be pinned to allow for linear extrapolation of other peaks.
-	PeakInfo max;
-	for (Int_t i = 0; i < this->peakPars.size(); i++) {
-		PeakInfo curr = this->peakPars[i];
-		if (curr.energy > max.energy) {
-			max = curr;
-		}
-	}
-	return max;
+	return this->peakPars[0];
 }
 
 Int_t PeakSet::indexOf(Double_t energy) {
