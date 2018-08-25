@@ -40,7 +40,7 @@ bool PeakFinder::isNumber(std::string input) {
 }
 
 
-PeakFinder::PeakFinder(TCanvas* canvas, TChain *c, PeakSet peaks, Double_t time, std::string channel) {
+PeakFinder::PeakFinder(TCanvas* canvas, TChain *c, PeakSet peaks, Double_t time, std::string channel, TApplication *app) {
 // Constructor: takes in a data chain c, a PeakSet containing each of the peaks to be
 // analyzed, the total time within the data run, and the channel to be used.  This
 // constructor then draws an initial histogram to guess the location of the highest energy 
@@ -90,33 +90,31 @@ PeakFinder::PeakFinder(TCanvas* canvas, TChain *c, PeakSet peaks, Double_t time,
 	line->SetLineColor(kRed);
 	line->Draw();
 
-	/*cout << "VISUAL CHECK" << endl;
-	cout << "estimated position for highest energy peak: " << pos << endl;
-	cout << "(type .q to continue)" << endl;
+	/*std::cout << "VISUAL CHECK" << std::endl;
+	std::cout << "estimated position for highest energy peak: " << pos << std::endl;
+	std::cout << "(type .q to continue)" << std::endl;
 	app->Run(true);
-	cout << "does this make sense? (y/n) ";
+	std::cout << "does this make sense? (y/n) ";
 	std::string response;
-	cin >> response;
+	std::cin >> response;
 	while (response != "y" && response != "n") {
-		cout << "error: cannot interpret response \"" + response + "\"" << endl;
-		cout << "estimated position for highest energy peak: ";
-		         cout << pos << endl;
-		cout << "does this make sense? (y/n) ";
-		cin >> response;
+		std::cout << "error: cannot interpret response \"" + response + "\"" << std::endl;
+		std::cout << "estimated position for first peak: " << pos << std::endl;
+		std::cout << "does this make sense? (y/n) ";
+		std::cin >> response;
 	}
 	if (response == "n") {
-		cout << "new peak position: ";
-		cin >> response;
+		std::cout << "new peak position: ";
+		std::cin >> response;
 		while (!this->isNumber(response)) {
-			cout << "error: response \"" + response + "\" isn't a number" << endl;
-			cout << "new peak position: ";
-			cin >> response;
+			std::cout << "error: response \"" + response + "\" isn't a number" << std::endl;
+			std::cout << "new peak position: ";
+			std::cin >> response;
 		}
 		pos = stod(response);
 		pos = this->snapToMax(hTemp, pos, 0.95 * pos, 1.05 * pos);
 	}
-	tempCanvas->Close();
-	*/
+	tempCanvas->Close();*/
 
 	Double_t normPos = pos / overflowPos;
 	
@@ -126,7 +124,7 @@ PeakFinder::PeakFinder(TCanvas* canvas, TChain *c, PeakSet peaks, Double_t time,
 	this->data->Draw("energy >> h", channel.c_str());
 	this->rawPlot = h;
 	
-	PeakInfo firstPeakInfo = this->peaks.getHighestEnergyPeak();
+	PeakInfo firstPeakInfo = this->peaks.getFirstPeak();
 	firstPeakInfo.mu = pos;
 	firstPeakInfo.count = h->GetBinContent(h->FindBin(pos));
 	this->pinnedPeak = firstPeakInfo;
@@ -147,7 +145,11 @@ PeakInfo PeakFinder::findPeak(Double_t energy) {
 	Double_t pos = energy * scaleFactor;
 	pos = this->snapToMax(this->rawPlot, pos, 0.95 * pos, 1.05 * pos);
 	
-	PeakInfo peak = this->peaks.get(energy);
+	PeakInfo peak;
+	if (this->peaks.indexOf(energy) != -1) {
+		peak = this->peaks.get(energy);
+	}
+	peak.energy = energy;
 	peak.mu = pos;
 	peak.count = this->rawPlot->GetBinContent(this->rawPlot->FindBin(pos));
 	this->peaks.put(peak);
@@ -253,7 +255,16 @@ void PeakFinder::fit(FitInfo info) {
 	firstPeak.muErr = fit->GetParError(1);
 	firstPeak.sigma = fit->GetParameter(2);
 	firstPeak.sigmaErr = fit->GetParError(2);
+	firstPeak.includeInCal = true;
+	for (Double_t en : info.excludeFromCal) {
+		if (en == firstPeak.energy) {
+			firstPeak.includeInCal = false;
+		}
+	}
 	this->peaks.put(firstPeak);
+
+	std::cout << "fitted " << firstPeak.energy << std::endl;
+	std::cout << "include in cal? " << firstPeak.includeInCal << std::endl;
 
 	for (Int_t i = 1; i < info.peakEnergies.size(); i++) {
 		PeakInfo nextPeak;
@@ -263,28 +274,41 @@ void PeakFinder::fit(FitInfo info) {
 		nextPeak.muErr = fit->GetParError(2 * i + 2);
 		nextPeak.sigma = fit->GetParameter(2);
 		nextPeak.sigmaErr = fit->GetParError(2);
+		nextPeak.includeInCal = true;
+		for (Double_t en : info.excludeFromCal) {
+			if (en == nextPeak.energy) {
+				nextPeak.includeInCal = false;
+			}
+		}
 		this->peaks.put(nextPeak);
+
+		std::cout << "fitted " << nextPeak.energy << std::endl;
+		std::cout << "include in cal? " << nextPeak.includeInCal << std::endl;
 	}
 	delete fit;
 }
 
 FitResults PeakFinder::findCalibration() {
 
-	Int_t numPeaks = this->peaks.size();	
+	std::cout << "Peaks included in calibration:" << std::endl;
 
+	Int_t numPeaks = 0;
 	std::vector<Double_t> expEs;
 	std::vector<Double_t> fitEs;
 	std::vector<Double_t> fitEErrs;
-	for (Int_t i = 0; i < numPeaks; i++) {
+	for (Int_t i = 0; i < this->peaks.size(); i++) {
 		PeakInfo currPeak = this->peaks.getAtIndex(i);
-		expEs.push_back(currPeak.energy);
-		fitEs.push_back(currPeak.mu);
-		fitEErrs.push_back(currPeak.muErr);
+		if (currPeak.includeInCal) {
+			expEs.push_back(currPeak.energy);
+			fitEs.push_back(currPeak.mu);
+			fitEErrs.push_back(currPeak.muErr);
+			numPeaks++;
 
-		std::cout << "Peak " << i + 1 << ": " << std::endl;
-		std::cout << "real energy: " << currPeak.energy << std::endl;
-		std::cout << "fitted energy: " << currPeak.mu << std::endl;
-		std::cout << std::endl;
+			std::cout << "peak " << numPeaks << std::endl;
+			std::cout << "expected energy: " << currPeak.energy << std::endl;
+			std::cout << "fitted position: " << currPeak.mu << std::endl;
+			std::cout << std::endl;
+		}
 	}
 
 	TF1 *calFit = new TF1("calFit", "pol1", 0, this->getOverflowPos());
