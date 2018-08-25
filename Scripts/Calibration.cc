@@ -32,20 +32,25 @@ Modes:
 "volt"	will execute calibration algorithm for voltage data.
 
 Options:
+"ba"		will include barium peaks in calibration.
+"muon"		will include cosmic muon peak in calibration (NYI)
 "cal" 		will display the graphs used to generate the calibrations for each run.
 "gain"		will display a graph of the calculated calibration slope (gain) as a function of
 		the dependent variable specified by the mode.
 "over"		will calibrate the spectra then overlay the calibrated histograms with real 
 		energies for qualitative comparison.
+"rawOver"	will plot the raw, uncalibrated spectra on top of each other for visual 
+		inspection.
 "res"		will display residues from the calibration algorithm for each run. Residues are 
 		the % error by which the calibrated energies deviate from expected.
 "sig" 		will display fractional sigmas for each peak in each run.
 "AE"		will display an amplitude / energy vs energy plot, useful for pulse shape 
 		discrimination.
-"backFits"	will display the background fits produced by the backEst function for all peaks.
+"back"		will display the background fits produced by the backEst function for all peaks.
+		currently broken.  Need to fix.
 "noise"		will display the noise wall energy vs the dependent variable set by the mode
 		parameter."
-"muon" (NYI)	will fit the muon peak.
+"rate"		will display the detector count rate as a function of tested variable.
 
 
 Required Directory structure for Calibration to work:
@@ -67,25 +72,11 @@ Crystal Serial #/
 
 Notes and TODO:
 
-	Data randomly deletes itself during execution.  This is almost certainly just a quirk 
-	of root itself, but I can't figure out exactly how to get around it atm.
-	
-	FIR stuff removed because it turns out the detector response to peaking time is mostly
-	flat in the region we're sensitive to.
+	Muon fits.  Might be tough with only 10 mins of data.
 
-	Continue making the script agnostic to low/high gain data.  This is mostly complete by
-	now, but I haven't had the chance to test it yet.  Ideally, we can take this one version
-	of the script and use it for both possible data sets since the underlying algorithm is
-	the same between them.  However, all the peaks we're actually fitting are different, 
-	which makes it more difficult to generalize.
+	fix background fits.
 
-	Fix Cs fit.  There's a few peaks underneath it that kind of screw it up.  Might want to
-	fix some parameters.
-
-	Figure out how to do math on TChains.  I want to store the calibrated data in the RESULTS
-	struct somewhere, but I need to apply the calibration directly to the data in that case.
-
-	Figure out how to get the visual check functioning correctly.
+	Figure out what's going on with canvases being overwritten.
 
 */
 
@@ -107,7 +98,8 @@ Int_t Calibration(string path, string mode, string option) {
 		// will segfault if there's no data for any one of these positions
 		cout << "Finding position data..." << endl;
 		cout << "Calibrating positions ";
-		for (Int_t pos : testedPositions) {
+		for (Int_t i = 0; i < testedPositions.size(); i++) {
+			Int_t pos = testedPositions[i];
 			cout << pos << " ";
 			string expectedPath = path + "/position/position_" + to_string(pos);
 			expectedPath += "/NaI_ET_run*";
@@ -120,7 +112,8 @@ Int_t Calibration(string path, string mode, string option) {
 		// will segfault if there's no data for any one of these voltages
 		cout << "Finding voltage data..." << endl;
 		cout << "Calibrating Votlages ";
-		for (Int_t volt : testedVoltages) {
+		for (Int_t i = 0; i < testedVoltages.size(); i++) {
+			Int_t volt = testedVoltages[i];
 			cout << volt << " ";
 			string expectedPath = path + "/voltage/" + to_string(volt);
 			expectedPath += "_V/NaI_ET_run*";
@@ -135,12 +128,12 @@ Int_t Calibration(string path, string mode, string option) {
 	}
 	Int_t NUMFILES = DATA.size();
 
-/*
-#######################
-#   USER PARAMETERS   #
-#######################
+	/*
+	#######################
+	#   USER PARAMETERS   #
+	#######################
 
-*/
+	*/
 
 	using ParGuess = pair<Int_t, Double_t>;
 	using ParLimit = pair<Int_t, ParWindow>;
@@ -149,23 +142,28 @@ Int_t Calibration(string path, string mode, string option) {
 	string CHANNEL = "channel==4"; // digitizer channel to use
 	
 	// 208Tl peak parameters:
+	// Tl must be first peak, since that's what the script uses to estimate other peaks.
+	Double_t Tl2615Energy = 2614.511;
+
 	FitInfo TlPars;
-	TlPars.peakEnergies.push_back(2614.511);
+	TlPars.peakEnergies.push_back(Tl2615Energy);
 	TlPars.fitFunc = "[0]*exp(-0.5*((x-[1])/[2])^2) + exp([3] + [4]*x)";
 
 	TlPars.fitPars.insert(ParGuess (0, 1.0));
 	TlPars.fitPars.insert(ParGuess (1, 1.0));
 	TlPars.fitPars.insert(ParGuess (2, 0.05));
 	// pars [3] and [4] will be set by background estimation in PeakFinder
-	
-	TlPars.fitWindow.low = 0.9; // window limits = proportions of highest energy peak mu
-	TlPars.fitWindow.high = 1.1; // i.e. 1.1 times peak mu
+
+	TlPars.fitWindow.low = 0.9; // window limits are proportions of first peak position
+	TlPars.fitWindow.high = 1.1; // i.e. 1.1 times (mu of first peak)
 	TlPars.backgroundRange = 0.3; // proportion of window to be considered in background est.
 	peakPars.push_back(TlPars);
 	
 	// 40K peak parameters:
+	Double_t K1460Energy = 1460.820;
+
 	FitInfo KPars;
-	KPars.peakEnergies.push_back(1460.820);
+	KPars.peakEnergies.push_back(K1460Energy);
 	KPars.fitFunc = "[0]*exp(-0.5*((x-[1])/[2])^2) + exp([3] + [4]*x)";
 
 	KPars.fitPars.insert(ParGuess (0, 1.0));
@@ -178,9 +176,12 @@ Int_t Calibration(string path, string mode, string option) {
 	peakPars.push_back(KPars);
 
 	// 137Cs peak parameters:
+	Double_t Cs661Energy = 661.657;
+	Double_t Tl583Energy = 583.187;
+
 	FitInfo CsPars;
-	CsPars.peakEnergies.push_back(661.657);
-	CsPars.peakEnergies.push_back(583.187);
+	CsPars.peakEnergies.push_back(Cs661Energy);
+	CsPars.peakEnergies.push_back(Tl583Energy);
 	CsPars.fitFunc = "[0]*exp(-0.5*((x-[1])/[2])^2) + [3]*exp(-0.5*((x-[4])/[2])^2)";
 	CsPars.fitFunc += " + exp([5]+[6]*x)";
 	
@@ -188,7 +189,7 @@ Int_t Calibration(string path, string mode, string option) {
 	CsPars.fitPars.insert(ParGuess (1, 1.0));
 	CsPars.fitPars.insert(ParGuess (2, 0.05));
 	CsPars.fitPars.insert(ParGuess (3, 0.1));
-	CsPars.fitPars.insert(ParGuess (4, 583.187 / 661.657));
+	CsPars.fitPars.insert(ParGuess (4, Tl583Energy / Cs661Energy));
 
 	/*ParWindow Cs661ParWindow;
 	Cs661ParWindow.low = 0.97;
@@ -196,9 +197,12 @@ Int_t Calibration(string path, string mode, string option) {
 	CsPars.fitParLimits.insert(ParLimit (1, Cs661ParWindow));*/
 
 	ParWindow Cs583ParWindow;
-	Cs583ParWindow.low = 583.187 / 661.657 - 0.03;
-	Cs583ParWindow.high = 583.187 / 661.657 + 0.03;
+	Cs583ParWindow.low = Tl583Energy / Cs661Energy - 0.03;
+	Cs583ParWindow.high = Tl583Energy / Cs661Energy + 0.03;
 	CsPars.fitParLimits.insert(ParLimit (4, Cs583ParWindow));
+
+	CsPars.excludeFromCal.push_back(Tl583Energy);
+	CsPars.excludeFromCal.push_back(Cs661Energy);
 	
 	CsPars.fitWindow.low = 0.75;
 	CsPars.fitWindow.high = 1.25;
@@ -221,27 +225,20 @@ Int_t Calibration(string path, string mode, string option) {
 		// Need to initialize and populate a PeakSet to bind to the analyzer engine.  
 		// Simultaneously generates vector of all peak energies to be considered.
 		PeakSet allPeaks;
+		PeakInfo firstPeak;
+		firstPeak.energy = peakPars[0].peakEnergies[0];
+		allPeaks.put(firstPeak);
 		vector<Double_t> allEnergies;
 		for (Int_t j = 0; j < peakPars.size(); j++) {
 			vector<Double_t> thisPeakEnergies = peakPars[j].peakEnergies;
 			for (Int_t k = 0; k < thisPeakEnergies.size(); k++) {
 				allEnergies.push_back(thisPeakEnergies[k]);
-				PeakInfo curr;
-				curr.energy = thisPeakEnergies[k];
-				allPeaks.put(curr);
 			}
 		}
-		PeakFinder *analyzer = new PeakFinder(fitCanvas, DATA[i], allPeaks, time, CHANNEL);
+		PeakFinder *analyzer = new PeakFinder(fitCanvas, DATA[i], allPeaks, time, CHANNEL, app);
 		
 		for (Int_t j = 0; j < peakPars.size(); j++) {
-
-			FitInfo pars;
-			pars.peakEnergies = peakPars[j].peakEnergies;
-			pars.fitWindow = peakPars[j].fitWindow;
-			pars.fitFunc = peakPars[j].fitFunc;
-			pars.fitPars = peakPars[j].fitPars;
-			pars.fitParLimits = peakPars[j].fitParLimits;
-			pars.backgroundRange = peakPars[j].backgroundRange;
+			FitInfo pars = peakPars[j];
 
 			Double_t energy = pars.peakEnergies[0];
 			analyzer->findPeak(energy);
@@ -309,7 +306,7 @@ Int_t Calibration(string path, string mode, string option) {
 			analyzer->fit(pars);
 		}
 		// save fits as .root / .png
-		Float_t range = 1.15 * analyzer->getPeakSet().getHighestEnergyPeak().mu;
+		Float_t range = 1.15 * analyzer->getPeakSet().getFirstPeak().mu;
 		analyzer->getRawPlot()->GetXaxis()->SetRangeUser(0, range);
 		analyzer->getRawPlot()->GetXaxis()->SetTitle("Uncalibrated Energy");
 		analyzer->getRawPlot()->GetYaxis()->SetTitle("Counts");
@@ -345,10 +342,226 @@ Int_t Calibration(string path, string mode, string option) {
    #####################
 */
 
+	if (option.find("ba") != string::npos) {
+		
+		TCanvas *can = fitCanvas;
+
+		for (Int_t i = 0; i < NUMFILES; i++) {
+			TH1D* h = ANALYZERS[i]->getRawPlot();
+			
+			Measurement maxBin;
+			maxBin.val = h->GetMaximumBin();
+			Measurement energy = ANALYZERS[i]->calibrate(maxBin);
+
+			if (energy.val < 30) {
+				FitInfo BaPars;
+				using ParGuess = pair<Int_t, Double_t>;
+				using ParLimit = pair<Int_t, ParWindow>;
+				
+				BaPars.peakEnergies.push_back(356.0129);
+				BaPars.peakEnergies.push_back(383.8485);
+				BaPars.peakEnergies.push_back(302.8508);
+				BaPars.peakEnergies.push_back(276.3989);
+
+				BaPars.fitFunc = "[0]*exp(-0.5*((x-[1])/[2])^2)";
+				BaPars.fitFunc += " + [3]*exp(-0.5*((x-[4])/[2])^2)";
+				BaPars.fitFunc += " + [5]*exp(-0.5*((x-[6])/[2])^2)";
+				BaPars.fitFunc += " + [7]*exp(-0.5*((x-[8])/[2])^2)";
+				BaPars.fitFunc += " + exp([9]+[10]*x)";
+
+				PeakInfo Ba356 = ANALYZERS[i]->findPeak(356.0129);
+				
+				BaPars.fitPars.insert(ParGuess (0, Ba356.count)); 
+				BaPars.fitPars.insert(ParGuess (1, Ba356.mu));
+				BaPars.fitPars.insert(ParGuess (2, 0.05 * Ba356.mu)); 
+				BaPars.fitPars.insert(ParGuess (3, 8.94 / 62.05 * Ba356.count));
+				BaPars.fitPars.insert(ParGuess (4, 383.8485 / 356.0129 * Ba356.mu)); 
+				BaPars.fitPars.insert(ParGuess (5, 18.34 / 62.05 * Ba356.count));
+				BaPars.fitPars.insert(ParGuess (6, 302.8508 / 356.0129 * Ba356.mu));
+				BaPars.fitPars.insert(ParGuess (7, 7.16 / 62.05 * Ba356.count));
+				BaPars.fitPars.insert(ParGuess (8, 276.3989 / 356.0129 * Ba356.mu));
+
+				ParWindow Ba383Window;
+				Ba383Window.low = (383.8485 / 356.0129 - 0.03) * Ba356.mu;
+				Ba383Window.high = (383.8485 / 356.0129 + 0.03) * Ba356.mu;
+				BaPars.fitParLimits.insert(ParLimit (4, Ba383Window));
+
+				ParWindow Ba356Window;
+				Ba356Window.low = 0.97 * Ba356.mu;
+				Ba356Window.high = 1.03 * Ba356.mu;
+				BaPars.fitParLimits.insert(ParLimit (1, Ba356Window));
+
+				ParWindow Ba302Window;
+				Ba302Window.low = (302.8508 / 356.0129 - 0.03) * Ba356.mu;
+				Ba302Window.high = (302.8508 / 356.0129 + 0.03) * Ba356.mu;
+				BaPars.fitParLimits.insert(ParLimit (6, Ba302Window));
+
+				ParWindow Ba276Window;
+				Ba276Window.low = (276.3989 / 356.0129 - 0.03) * Ba356.mu;
+				Ba276Window.high = (276.3989 / 356.0129 + 0.03) * Ba356.mu;
+				BaPars.fitParLimits.insert(ParLimit (8, Ba276Window));
+				
+				BaPars.fitWindow.low = 0.6 * Ba356.mu;
+				BaPars.fitWindow.high = 1.25 * Ba356.mu;
+				BaPars.backgroundRange = 0.3;
+				
+				ANALYZERS[i]->fit(BaPars);
+				ANALYZERS[i]->findCalibration();
+				
+				// redraw hist
+				can->cd(i + 1);
+				gPad->SetLogy();
+				Float_t range = 1.15*ANALYZERS[i]->getPeakSet().getFirstPeak().mu;
+				ANALYZERS[i]->getRawPlot()->GetXaxis()->SetRangeUser(0, range);
+				ANALYZERS[i]->getRawPlot()->Draw();
+			}
+		}
+		
+	}
+	/*
+	if (option.find("muon") != string::npos && mode == "pos") {
+		
+		TCanvas *muonCanvas = new TCanvas("muonCanvas", "muonCanvas", 1);
+		gPad->SetLogy();
+
+		TChain* allData = new TChain("st");
+		for (TChain* c : DATA) {
+			allData->Add(c);
+		}
+		
+		FitResults avgCalib;
+		for (Int_t i = 0; i < NUMFILES; i++) {
+			FitResults currCalib = ANALYZERS[i]->getCalibration();
+			avgCalib.slope += currCalib.slope;
+			avgCalib.slopeErr += TMath::Power(currCalib.slopeErr, 2);
+			avgCalib.offset += currCalib.offset;
+			avgCalib.offsetErr += TMath::Power(currCalib.offsetErr, 2);
+		}
+		avgCalib.slope = avgCalib.slope / NUMFILES;
+		avgCalib.slopeErr = TMath::Sqrt(avgCalib.slopeErr) / NUMFILES;
+		avgCalib.offset = avgCalib.offset / NUMFILES;
+		avgCalib.offsetErr = TMath::Sqrt(avgCalib.offsetErr) / NUMFILES;
+
+		Double_t maxEnergy = allData->GetMaximum("energy");
+		Double_t calMaxEnergy = (maxEnergy - avgCalib.offset) / avgCalib.slope;
+
+		if (calMaxEnergy > 30000) {				
+			Double_t predMuPos;
+			Int_t avgNBins;
+			for (Int_t i = 0; i < NUMFILES; i++) {
+				PeakSet peaks = ANALYZERS[i]->getPeakSet();
+				PeakInfo pinnedPeak = peaks.getFirstPeak();
+				predMuPos += 25000 / pinnedPeak.energy * pinnedPeak.mu;
+
+				TH1D *h = ANALYZERS[i]->getRawPlot();
+				avgNBins += h->GetNbinsX();
+			}
+			predMuPos = predMuPos / NUMFILES;
+			avgNBins = avgNBins / NUMFILES;
+			
+			TH1D *muH = new TH1D("muH", "", avgNBins / 20, 0, maxEnergy);
+			muH->SetTitle("Muon Hist (summed position data)");
+			muH->GetXaxis()->SetTitle("Uncalibrated Energy");
+			muH->GetYaxis()->SetTitle("Counts");
+			allData->Draw("energy >> muH", CHANNEL.c_str());
+			
+			muH->GetXaxis()->SetRangeUser(0.95 * predMuPos, 1.05 * predMuPos);
+			predMuPos = muH->GetXaxis()->GetBinCenter(muH->GetMaximumBin());
+			muH->GetXaxis()->SetRangeUser(0, muH->GetNbinsX());
+
+			cout << "guessed muon peak val: " << predMuPos << endl;
+
+			ParWindow muFitWindow;
+			muFitWindow.low = 0.9 * predMuPos;
+			muFitWindow.high = 1.1 * predMuPos;
+
+			cout << "muon fit window: " << endl;
+			cout << "low: " << muFitWindow.low << ", high: " << muFitWindow.high;
+			cout << endl;
+
+			TF1 *muonFit = new TF1("muonFit", "landau", muFitWindow.low, muFitWindow.high);
+			muH->Fit(muonFit, "R+l");
+
+			PeakInfo muonInfo;
+			muonInfo.energy = 25000;
+			muonInfo.mu = muonFit->GetParameter(1);
+			muonInfo.muErr = muonFit->GetParError(1);
+			muonInfo.sigma = muonFit->GetParameter(2);
+			muonInfo.sigmaErr = muonFit->GetParError(2);
+
+			for (Int_t i = 0; i < NUMFILES; i++) {
+				ANALYZERS[i]->getPeakSet().put(muonInfo);
+				ANALYZERS[i]->findCalibration();
+			}
+			
+		}
+
+	}
+	*/
+	if (option.find("muon") != string::npos) {
+		
+		TCanvas *muonCanvas = new TCanvas("muonCanvas", "muonCanvas", 1);
+		muonCanvas->Divide(NUMFILES / 2, NUMFILES / 2 + 1);
+
+		for (Int_t i = 0; i < NUMFILES; i++) {
+			muonCanvas->cd(i + 1);
+
+			Measurement maxEnergy;
+			maxEnergy.val = DATA[i]->GetMaximum("energy");
+			maxEnergy = ANALYZERS[i]->calibrate(maxEnergy);
+
+			cout << "max energy is: " << maxEnergy.val << endl;
+			
+			if (maxEnergy.val > 30000) {				
+				PeakSet peaks = ANALYZERS[i]->getPeakSet();
+				PeakInfo pinnedPeak = peaks.getFirstPeak();
+				Double_t pos = 25000 / pinnedPeak.energy * pinnedPeak.mu;
+
+				TH1D *h = ANALYZERS[i]->getRawPlot();
+				
+				string muName = "Muon Hist for ";
+				string label;
+				if (mode == "pos") {
+					label = "Position " + to_string(POSITIONS[i]);
+				} else if (mode == "volt") {
+					label = to_string(VOLTAGES[i]) + " V";
+				}
+				muName += label;
+				Int_t nBins = h->GetNbinsX();
+				Double_t max = h->GetBinLowEdge(nBins) + h->GetBinWidth(nBins);
+				TH1D *muH = new TH1D(muName.c_str(), label.c_str(), nBins/80, 0, max);
+				DATA[i]->Draw(("energy >> " + muName).c_str(), CHANNEL.c_str());
+				
+				muH->GetXaxis()->SetRangeUser(0.95 * pos, 1.05 * pos);
+				pos = muH->GetXaxis()->GetBinCenter(muH->GetMaximumBin());
+				muH->GetXaxis()->SetRangeUser(0, muH->GetNbinsX());
+
+				cout << "expected muon peak val: " << pos << endl;
+
+				cout << "muon fit window: " << endl;
+				cout << "low: " << 0.9 * pos << ", high: " << 1.1 * pos << endl;
+
+				TF1 *muonFit = new TF1("muonFit", "landau", 0.9*pos, 1.1*pos);
+				muH->Fit(muonFit, "R+l");
+
+				PeakInfo muonInfo;
+				muonInfo.energy = 25000;
+				muonInfo.mu = muonFit->GetParameter(1);
+				muonInfo.muErr = muonFit->GetParError(1);
+				muonInfo.sigma = muonFit->GetParameter(2);
+				muonInfo.sigmaErr = muonFit->GetParError(2);
+
+				ANALYZERS[i]->getPeakSet().put(muonInfo);
+				ANALYZERS[i]->findCalibration();
+			}
+		}
+
+	}
+
 	if (mode == "pos") {
 
 		//Double_t CsEnergy = 1460.820;
-		Double_t CsEnergy = 661.657;
+		Double_t CsEnergy = Cs661Energy;
 		
 		vector<Double_t> calibratedCsEnergies;
 		vector<Double_t> calibratedCsEnergyErrs;
@@ -511,118 +724,6 @@ Int_t Calibration(string path, string mode, string option) {
    #######################
 */
 
-	if (option.find("ba") != string::npos) {
-		
-		for (Int_t i = 0; i < NUMFILES; i++) {
-			TH1D* h = ANALYZERS[i]->getRawPlot();
-			
-			Measurement maxBin;
-			maxBin.val = h->GetMaximumBin();
-
-			Measurement energy = ANALYZERS[i]->calibrate(maxBin);
-			if (energy.val < 30) {
-				FitInfo BaPars;
-				using ParGuess = pair<Int_t, Double_t>;
-				using ParLimit = pair<Int_t, ParWindow>;
-				
-				BaPars.peakEnergies.push_back(356.0129);
-				BaPars.peakEnergies.push_back(383.8485);
-				BaPars.peakEnergies.push_back(302.8508);
-				BaPars.peakEnergies.push_back(276.3989);
-				for (Double_t en : BaPars.peakEnergies) {
-					PeakInfo currPeak;
-					currPeak.energy = en;
-					ANALYZERS[i]->getPeakSet().put(currPeak);
-				}
-
-				BaPars.fitFunc = "[0]*exp(-0.5*((x-[1])/[2])^2)";
-				BaPars.fitFunc += " + [3]*exp(-0.5*((x-[4])/[2])^2)";
-				BaPars.fitFunc += " + [5]*exp(-0.5*((x-[6])/[2])^2)";
-				BaPars.fitFunc += " + [7]*exp(-0.5*((x-[8])/[2])^2)";
-				BaPars.fitFunc += " + exp([9]+[10]*x)";
-
-				PeakInfo Ba356 = ANALYZERS[i]->findPeak(356.0129);
-				
-				BaPars.fitPars.insert(ParGuess (0, Ba356.count)); 
-				BaPars.fitPars.insert(ParGuess (1, Ba356.mu));
-				BaPars.fitPars.insert(ParGuess (2, 0.05 * Ba356.mu)); 
-				BaPars.fitPars.insert(ParGuess (3, 8.94 / 62.05 * Ba356.count));
-				BaPars.fitPars.insert(ParGuess (4, 383.8485 / 356.0129 * Ba356.mu)); 
-				BaPars.fitPars.insert(ParGuess (5, 18.34 / 62.05 * Ba356.count));
-				BaPars.fitPars.insert(ParGuess (6, 302.8508 / 356.0129 * Ba356.mu));
-				BaPars.fitPars.insert(ParGuess (7, 7.16 / 62.05 * Ba356.count));
-				BaPars.fitPars.insert(ParGuess (8, 276.3989 / 356.0129 * Ba356.mu));
-
-				ParWindow Ba383Window;
-				Ba383Window.low = (383.8485 / 356.0129 - 0.03) * Ba356.mu;
-				Ba383Window.high = (383.8485 / 356.0129 + 0.03) * Ba356.mu;
-				BaPars.fitParLimits.insert(ParLimit (4, Ba383Window));
-
-				ParWindow Ba356Window;
-				Ba356Window.low = 0.97 * Ba356.mu;
-				Ba356Window.high = 1.03 * Ba356.mu;
-				BaPars.fitParLimits.insert(ParLimit (1, Ba356Window));
-
-				ParWindow Ba302Window;
-				Ba302Window.low = (302.8508 / 356.0129 - 0.03) * Ba356.mu;
-				Ba302Window.high = (302.8508 / 356.0129 + 0.03) * Ba356.mu;
-				BaPars.fitParLimits.insert(ParLimit (6, Ba302Window));
-
-				ParWindow Ba276Window;
-				Ba276Window.low = (276.3989 / 356.0129 - 0.03) * Ba356.mu;
-				Ba276Window.high = (276.3989 / 356.0129 + 0.03) * Ba356.mu;
-				BaPars.fitParLimits.insert(ParLimit (8, Ba276Window));
-				
-				BaPars.fitWindow.low = 0.6 * Ba356.mu;
-				BaPars.fitWindow.high = 1.25 * Ba356.mu;
-				BaPars.backgroundRange = 0.3;
-				
-				ANALYZERS[i]->fit(BaPars);
-				ANALYZERS[i]->findCalibration();
-				
-				// redraw hist
-				fitCanvas->cd(i + 1);
-				gPad->SetLogy();
-				Float_t range = 1.15*ANALYZERS[i]->getPeakSet().get(2614.511).mu;
-				ANALYZERS[i]->getRawPlot()->GetXaxis()->SetRangeUser(0, range);
-				ANALYZERS[i]->getRawPlot()->Draw();
-			}
-		}
-		
-	}
-	if (option.find("muon") != string::npos) {
-		
-		for (Int_t i = 0; i < NUMFILES; i++) {
-			Measurement maxEnergy;
-			maxEnergy.val = DATA[i]->GetMaximum("energy");
-			maxEnergy = ANALYZERS[i]->calibrate(maxEnergy);
-			
-			if (maxEnergy.val > 30000) {				
-				PeakSet peaks = ANALYZERS[i]->getPeakSet();
-				PeakInfo highEPeak = peaks.getHighestEnergyPeak();
-				Double_t pos = 25000 / highEPeak.energy * highEPeak.mu;
-				
-				TH1D *h = (TH1D*) ANALYZERS[i]->getRawPlot()->Clone();
-				h->Rebin(4);
-				h->GetXaxis()->SetRangeUser(0.9 * pos, 1.1 * pos);
-				pos = h->GetXaxis()->GetBinCenter(h->GetMaximumBin());
-				h->GetXaxis()->SetRangeUser(0, h->GetNbinsX());
-
-				TF1 *muonFit = new TF1("muonFit", "landau", 0.8*pos, 1.2*pos);
-				
-				PeakInfo muonInfo;
-				muonInfo.energy = 25000;
-				muonInfo.mu = muonFit->GetParameter(0);
-				muonInfo.muErr = muonFit->GetParError(0);
-				muonInfo.sigma = muonFit->GetParameter(1);
-				muonInfo.sigmaErr = muonFit->GetParError(1);
-
-				ANALYZERS[i]->getPeakSet().put(muonInfo);
-				ANALYZERS[i]->findCalibration();
-			}
-		}
-
-	}
 	if (option.find("cal") != string::npos) {
 		
 		TCanvas* calCanvas = new TCanvas("calCanvas", "calCanvas", 1);
@@ -659,6 +760,8 @@ Int_t Calibration(string path, string mode, string option) {
 		calComp->GetYaxis()->SetTitle("ADC Energy");
 		calComp->GetXaxis()->SetTitle("Calibrated Energy (keV)");
 		calComp->GetXaxis()->SetRangeUser(300, 3000);
+		gPad->SetLogy();
+		gPad->SetLogx();
 
 		calComp->Draw("ALP");
 		calCanvas->BuildLegend(0.15, 0.6, 0.30, 0.85);   // legend in top left
@@ -734,7 +837,7 @@ Int_t Calibration(string path, string mode, string option) {
 		sigmaComp->GetXaxis()->SetTitle("Calibrated Energy (keV)");
 		sigmaComp->GetXaxis()->SetRangeUser(300, 3000);
 
-		sigmaComp->Draw("ALP");
+		sigmaComp->Draw("AP");
 		sigmaCanvas->BuildLegend(0.7,0.6,0.85,0.85);   // legend in top right
 
 	}
@@ -762,7 +865,7 @@ Int_t Calibration(string path, string mode, string option) {
 				energyResidues.push_back(calibrated.val - peak.energy);
 				energyResidueErrs.push_back(calibrated.err);
 			}
-		
+			
 			TGraphErrors *residuePlot = new TGraphErrors(energies.size(), 
 			                            &energies[0], &energyResidues[0], 0, 
 			                            &energyResidueErrs[0]);
@@ -798,7 +901,7 @@ Int_t Calibration(string path, string mode, string option) {
 		resComp->GetYaxis()->SetTitleOffset(1.2);
 		resComp->GetXaxis()->SetRangeUser(300, 3000);
 
-		resComp->Draw("ALP");
+		resComp->Draw("AP");
 		resCanvas->BuildLegend(0.15,0.15,0.30,0.40);   // legend in bottom left
 
 	}
@@ -1039,7 +1142,7 @@ Int_t Calibration(string path, string mode, string option) {
 			allData->Add(c);
 		}
 
-		FitResults calib = ANALYZERS[NUMFILES / 2]->getCalibration();
+		FitResults calib = ANALYZERS[NUMFILES / 2 + 1]->getCalibration();
 
 		string calE = "(energy-"+to_string(calib.offset)+")/"+to_string(calib.slope);
 		string toPlot = "amp / (" + calE + ") : (" + calE + ") >> AEHist";
