@@ -1,6 +1,7 @@
 #ifndef CALSTRUCT_H
 #define CALSTRUCT_H
 
+#include <map>
 #include <TH1.h>
 #include <TGraphErrors.h>
 
@@ -16,7 +17,11 @@ struct PeakInfo {
 	Double_t sigma;
 	Double_t sigmaErr;
 	Double_t count;
-	bool includeInCal;
+	bool includeInCal = true;
+
+	bool operator < (const PeakInfo &other) const {
+		return energy < other.energy;
+	}
 };
 
 struct FitResults {
@@ -24,6 +29,9 @@ struct FitResults {
 	Double_t offsetErr;
 	Double_t slope;
 	Double_t slopeErr;
+
+	//Double_t nonlinear;
+	//Double_t nonlinearErr;
 };
 
 struct FitInfo {
