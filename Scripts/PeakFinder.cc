@@ -19,10 +19,25 @@
 #include "PeakSet.h"
 #include "PeakFinder.h"
 
-// This class describes the analysis engine itself, which handles all the heavy lifting of the 
-// characterization program. 
+/*
+This class describes the core of the analysis engine itself, which handles all the heavy lifting 
+of the characterization program.  This includes peak fitting, background estimation, and 
+generating the calibration itself.
+*/
 
-Double_t PeakFinder::snapToMax(TH1D *h, Int_t pos, Double_t low, Double_t high) {
+Double_t PeakFinder::snapToMax(TH1D *h, Double_t low, Double_t high) {
+/* returns the location of the local maximum within the provided window
+
+Accepts:
+	TH1D *h: the histogram to scan over.
+	Double_t low: the low edge of the snap window (in units of h's x-axis)
+	Double_t high: the high edge of the snap window (in units of h's x-axis)
+
+Returns:
+	Double_t describing the location (in units of h's x-axis) of the bin with the 
+		maximum contents in the window.
+
+*/
 	h->GetXaxis()->SetRangeUser(low, high);
 	Double_t maxPos = h->GetXaxis()->GetBinCenter(h->GetMaximumBin());
 	h->GetXaxis()->SetRangeUser(0, this->getOverflowPos());
@@ -30,6 +45,15 @@ Double_t PeakFinder::snapToMax(TH1D *h, Int_t pos, Double_t low, Double_t high) 
 }
 
 bool PeakFinder::isNumber(std::string input) {
+/* tests if a string consists only of numbers
+
+Accepts:
+	string input: string to be analyzed.
+
+Returns:
+	true if string contains nothing but numerical digits.
+
+*/
 	for (Int_t i = 0; i < input.length(); i++) {
 		char c = input[i];
 		if (!isdigit(c)) {
@@ -39,19 +63,24 @@ bool PeakFinder::isNumber(std::string input) {
 	return input.length() != 0;
 }
 
+PeakFinder::PeakFinder(Double_t pinnedEnergy, TChain *c, std::string channel, TApplication *app) {
+/* Constructor: builds a PeakFinder object
 
-PeakFinder::PeakFinder(TCanvas* canvas, TChain *c, PeakSet peaks, Double_t time, std::string channel, TApplication *app) {
-// Constructor: takes in a data chain c, a PeakSet containing each of the peaks to be
-// analyzed, the total time within the data run, and the channel to be used.  This
-// constructor then draws an initial histogram to guess the location of the highest energy 
-// peak, asks for user confirmation/override, then redraws the final histogram with a 
-// guaranteed 500 bins below the confirmed highest energy peak position.  This is done to 
-// enhance fit quality.
-	this->canvas = canvas;
+Accepts:
+	Double_t pinnedEnergy: the energy of the pinned peak, which will be used to estimate
+		the other peak locations.  As implemented, this should always be the energy
+		of the 208Tl peak (2614.511 keV)
+	TChain *c: pointer to the TChain containing the raw data to be analyzed.
+	string channel: the digitizer channel for which data is to be analyzed.
+	TApplication *app: a pointer to a ROOT interactive application, to allow for user input
+		and manipulation of plots.
+
+Returns:
+	A PeakFinder object initialized with the relevant information to begin analysis.
+
+*/
 	this->data = c;
-	this->time = time;
 	this->channel = channel;
-	this->peaks = peaks;
 	
 	Int_t numBins = 16384; // 2^14
 	TCanvas *tempCanvas = new TCanvas("tempCanvas", "tempCanvas");
@@ -63,11 +92,12 @@ PeakFinder::PeakFinder(TCanvas* canvas, TChain *c, PeakSet peaks, Double_t time,
 	hTemp->GetYaxis()->SetTitle("Count");
 	this->data->Draw("energy >> hTemp", this->channel.c_str());
 
+	// must identify the position of the pinned peak, so that other peaks may be estimated.
 	TH1D* hSmoothed = (TH1D*) hTemp->Clone();
 	hSmoothed->Smooth(1);
 	TSpectrum* s = new TSpectrum();
 	Int_t nFound = s->Search(hSmoothed, 2, "", 0.0001);
-	while (nFound > 7) {
+	while (nFound > 7) {   // arbitrary threshold.  7 seems to work well.
 		hSmoothed->Rebin(2);
 		nFound = s->Search(hSmoothed, 2, "", 0.0001);
 	}
@@ -82,7 +112,7 @@ PeakFinder::PeakFinder(TCanvas* canvas, TChain *c, PeakSet peaks, Double_t time,
 		}
 	}
 	Double_t pos = TlGuess;
-	pos = this->snapToMax(hTemp, pos, 0.95 * (Double_t) pos, 1.05 * (Double_t) pos);
+	pos = this->snapToMax(hTemp, 0.95 * (Double_t) pos, 1.05 * (Double_t) pos);
 	hTemp->Draw();
 	
 	hTemp->GetXaxis()->SetRangeUser(0, 2 * pos);
@@ -90,6 +120,7 @@ PeakFinder::PeakFinder(TCanvas* canvas, TChain *c, PeakSet peaks, Double_t time,
 	line->SetLineColor(kRed);
 	line->Draw();
 
+	// user must manually verify the found peak position.
 	/*std::cout << "VISUAL CHECK" << std::endl;
 	std::cout << "estimated position for highest energy peak: " << pos << std::endl;
 	std::cout << "(type .q to continue)" << std::endl;
@@ -112,44 +143,59 @@ PeakFinder::PeakFinder(TCanvas* canvas, TChain *c, PeakSet peaks, Double_t time,
 			std::cin >> response;
 		}
 		pos = stod(response);
-		pos = this->snapToMax(hTemp, pos, 0.95 * pos, 1.05 * pos);
-	}
-	tempCanvas->Close();*/
+		pos = this->snapToMax(hTemp, 0.95 * pos, 1.05 * pos);
+	} */
+	delete tempCanvas;
 
+	// histogram is redrawn with a constant 500 bins below first peak position
+	// this helps stabilize fits
 	Double_t normPos = pos / overflowPos;
-	
 	numBins = (Int_t) (500.0 / normPos);
 	this->numBins = numBins;
 	TH1D *h = new TH1D("h", "Uncalibrated Spectrum", numBins, 0, overflowPos);
-	this->data->Draw("energy >> h", channel.c_str());
+	this->data->Draw("energy >> h", channel.c_str(), "goff");
 	this->rawPlot = h;
 	
-	PeakInfo firstPeakInfo = this->peaks.getFirstPeak();
-	firstPeakInfo.mu = pos;
-	firstPeakInfo.count = h->GetBinContent(h->FindBin(pos));
-	this->pinnedPeak = firstPeakInfo;
-	this->peaks.put(firstPeakInfo);
+	this->pinnedPeak.energy = pinnedEnergy;
+	this->pinnedPeak.mu = pos;
+	this->pinnedPeak.count = h->GetBinContent(h->FindBin(pos));
+	this->peaks.put(this->pinnedPeak);
 
 	delete hTemp;
 }
 
+void PeakFinder::addPeakToSet(PeakInfo info) {
+/* adds a peak to this analyzer's set
+
+Accepts:
+	PeakInfo info: peak to be inserted into this analyzer's PeakSet
+
+*/
+	this->peaks.put(info);
+}
+
 PeakInfo PeakFinder::findPeak(Double_t energy) {
-// Estimates a peak's location by linear extrapolation from the confirmed location of the
-// highest energy peak as found in the constructor above.  This function then snaps the
-// estimate to the local maximum within +-5% of the estimated position and returns the 
-// corresponding position as a final estimate.
+/* estimates a peak's position by linear extrapolation from pinned peak
+
+Accepts:
+	Double_t energy: the energy of the peak to be found
+
+Returns:
+	PeakInfo describing the parameters of the found peak
+
+*/
 	Double_t pinnedEnergy = this->pinnedPeak.energy;
 	Double_t pinnedPosition = this->pinnedPeak.mu;
-	Double_t scaleFactor = pinnedPosition / pinnedEnergy;
-	
-	Double_t pos = energy * scaleFactor;
-	pos = this->snapToMax(this->rawPlot, pos, 0.95 * pos, 1.05 * pos);
-	
+	Double_t pos = energy * pinnedPosition / pinnedEnergy;
+	// automatically snaps to local max within +/- 5% of estimated position
+	pos = this->snapToMax(this->rawPlot, 0.95 * pos, 1.05 * pos);
+
 	PeakInfo peak;
-	if (this->peaks.indexOf(energy) != -1) {
+	if (this->peaks.contains(energy)) {
 		peak = this->peaks.get(energy);
+	} else {
+		peak.energy = energy;
 	}
-	peak.energy = energy;
 	peak.mu = pos;
 	peak.count = this->rawPlot->GetBinContent(this->rawPlot->FindBin(pos));
 	this->peaks.put(peak);
@@ -158,18 +204,24 @@ PeakInfo PeakFinder::findPeak(Double_t energy) {
 }
 
 FitResults PeakFinder::backEst(ParWindow win, Double_t range, std::string fitFunc) {
-// This function provides an estimate of the background underneath a peak by counting
-// inwards from the edges of the provided ParWindow.  It first translates the window's edges
-// into bin numbers, then counts inwards from the window edges a number of bins determined
-// by the provided range parameter.  It pushes the contents of these counted bins into a
-// TGraph, whereupon they may be fit according to the supplied fitFunc, the results of
-// which are returned as a FitResults struct.
+/* Estimates the background underneath a peak by counting inwards from the window's edges.
 
-// The range parameter works as a proportion of the provided window to be considered in
-// background estimation.  1.00 means 100% of the window will be included in the background
-// estimation and 0.00 means none will.  This number should be chosen to maximize the number
-// of points considered in the background fit, but should not include data from the peak 
-// itself.
+Accepts:
+	ParWindow win: the window identifying the lower and upper bounds to be used in the
+		background estimation algorithm.  ParWindow defined at line 7 in CalStructs.h
+	Double_t range: the proportion of the provided window to be considered in the background 
+		estimation (0 < range < 1.0).  This number should be chosen to maximize the 
+		number of points considered background, but should not include any data from
+		the region of the peak itself.  In Calibration.cc, the "back" option will
+		allow for a visual inspection so that this parameter may be tuned.
+	string fitFunc: describes the function to be used for background fitting.  As implemented,
+		this should always be an exponential ("expo").
+
+Returns:
+	FitResults describing the parameters (with errors) of the background curve.  As 
+		implemented, this is always of the form: "exp([offset] + [slope] * x)
+
+*/
 	TH1D *h = this->rawPlot;
 	
 	Int_t lowBin = h->FindBin(win.low);
@@ -215,17 +267,30 @@ FitResults PeakFinder::backEst(ParWindow win, Double_t range, std::string fitFun
 }
 
 void PeakFinder::fit(FitInfo info) {
-// This function provides a fit to a region specified by the provided ParWindow.  It 
-// automatically estimates background and can fit multiple peaks at once if necessary.
-// The user must supply energies and initial guesses for each peak to be fitted.
+/* performs a fit to a region on this PeakFinder's histogram.  Automatically estimates background 
+and can fit to an arbitrary number of peaks.
 
-// Make it so that every guassian beyond the first has only 2 parameters.  The resolution
-// should not change.  It's a feature of the detector, not the peak.
+Accepts:
+	FitInfo info: a struct containing all of the necessary information for the desired fit,
+		including the fit function, peak energies, parameter guesses, parameter limits, 
+		fit window, and background range.  FitInfo defined at line 36 of CalStructs.h
 
-	TCanvas *c = this->canvas;
+Returns:
+	nothing.  Updates values in this PeakFinder's PeakSet based on results of fit.
+
+*/
+	TCanvas *c = new TCanvas("c", "c");
 	TH1D *h = this->rawPlot;
 	Int_t pos = this->findPeak(info.peakEnergies[0]).mu;
 	Int_t count = h->GetBinContent(h->FindBin(pos));
+
+	/*fit function must be of form:
+
+	[0]*exp(-0.5*((x-[1])/[2])^2) + [3]*exp(-0.5*((x-[4])/[2])^2) + ...  + exp([n-1]+[n]*x);
+	
+	note that each peak has the same width set by parameter [2], though there may be
+	an arbitrary amount of gaussian peaks to consider.
+	*/
 	
 	TF1 *fit = new TF1("fit", info.fitFunc.c_str(), info.fitWindow.low, info.fitWindow.high);
 	Int_t highestKey = 0;
@@ -243,9 +308,8 @@ void PeakFinder::fit(FitInfo info) {
 		fit->SetParLimits(lims.first, lims.second.low, lims.second.high);
 	}
 
-	h->Fit(fit, "R+L"); // Q suppresses some output, ME does "better" fits and error estimation
-	//h->Draw("SAME");
-	h->Draw();
+	h->Fit(fit, "R+L"); // Q suppresses some output, ME = "better" fits and error estimation
+	h->Draw("goff");
 	gPad->SetLogy();
 
 	PeakInfo firstPeak;
@@ -255,16 +319,12 @@ void PeakFinder::fit(FitInfo info) {
 	firstPeak.muErr = fit->GetParError(1);
 	firstPeak.sigma = fit->GetParameter(2);
 	firstPeak.sigmaErr = fit->GetParError(2);
-	firstPeak.includeInCal = true;
 	for (Double_t en : info.excludeFromCal) {
 		if (en == firstPeak.energy) {
 			firstPeak.includeInCal = false;
 		}
 	}
 	this->peaks.put(firstPeak);
-
-	std::cout << "fitted " << firstPeak.energy << std::endl;
-	std::cout << "include in cal? " << firstPeak.includeInCal << std::endl;
 
 	for (Int_t i = 1; i < info.peakEnergies.size(); i++) {
 		PeakInfo nextPeak;
@@ -274,62 +334,71 @@ void PeakFinder::fit(FitInfo info) {
 		nextPeak.muErr = fit->GetParError(2 * i + 2);
 		nextPeak.sigma = fit->GetParameter(2);
 		nextPeak.sigmaErr = fit->GetParError(2);
-		nextPeak.includeInCal = true;
 		for (Double_t en : info.excludeFromCal) {
 			if (en == nextPeak.energy) {
 				nextPeak.includeInCal = false;
 			}
 		}
 		this->peaks.put(nextPeak);
-
-		std::cout << "fitted " << nextPeak.energy << std::endl;
-		std::cout << "include in cal? " << nextPeak.includeInCal << std::endl;
 	}
 	delete fit;
+	delete c;
 }
 
 FitResults PeakFinder::findCalibration() {
+/* finds a calibration for this detector
 
-	std::cout << "Peaks included in calibration:" << std::endl;
+Accepts:
+	nothing.  All relevant information is stored in this PeakFinder's PeakSet
 
-	Int_t numPeaks = 0;
+Returns:
+	FitResults describing the final parameters of the found calibration
+
+*/
 	std::vector<Double_t> expEs;
 	std::vector<Double_t> fitEs;
 	std::vector<Double_t> fitEErrs;
-	for (Int_t i = 0; i < this->peaks.size(); i++) {
-		PeakInfo currPeak = this->peaks.getAtIndex(i);
-		if (currPeak.includeInCal) {
-			expEs.push_back(currPeak.energy);
-			fitEs.push_back(currPeak.mu);
-			fitEErrs.push_back(currPeak.muErr);
-			numPeaks++;
-
-			std::cout << "peak " << numPeaks << std::endl;
-			std::cout << "expected energy: " << currPeak.energy << std::endl;
-			std::cout << "fitted position: " << currPeak.mu << std::endl;
-			std::cout << std::endl;
+	for (PeakInfo pk : this->peaks.getSet()) {
+		if (pk.includeInCal) {
+			expEs.push_back(pk.energy);
+			fitEs.push_back(pk.mu);
+			fitEErrs.push_back(pk.muErr);
 		}
 	}
 
-	TF1 *calFit = new TF1("calFit", "pol1", 0, this->getOverflowPos());
-	this->calPlot = new TGraphErrors(numPeaks, &expEs[0], &fitEs[0], 0, &fitEErrs[0]);
-	this->calPlot->Fit("calFit", "", "", 0, 0);
+	// calibration is linear for now
+	TF1 *calFit = new TF1("calFit", "pol1", 0, this->data->GetMaximum("energy"));
+	this->calPlot = new TGraphErrors(expEs.size(), &expEs[0], &fitEs[0], 0, &fitEErrs[0]);
+	this->calPlot->Fit("calFit", "R+");
 
 	FitResults pars;
-	pars.slope = calFit->GetParameter(1);
-	pars.slopeErr = calFit->GetParError(1);
 	pars.offset = calFit->GetParameter(0);
 	pars.offsetErr = calFit->GetParError(0);
+	pars.slope = calFit->GetParameter(1);
+	pars.slopeErr = calFit->GetParError(1);
+	//pars.nonlinear = calFit->GetParameter(2);
+	//pars.nonlinear = calFit->GetParError(2);
 
 	this->calibration = pars;
 	return pars;
 }
 
 Measurement PeakFinder::calibrate(Measurement uncalibrated) {
+/* converts a given measurement to a real energy scale based on this PeakFinder's found 
+calibration.  Also performs error analysis.
+
+Accepts:
+	Measurement uncalibrated: the measurement (value and error) to be calibrated.  
+		Measurement defined at line 46 of CalStructs.h
+
+Returns:
+	Measurement describing the calibrated measurement, including error.
+
+*/
 	FitResults calPars = this->calibration;
 	Double_t calEnergy = (uncalibrated.val - calPars.offset) / calPars.slope;
 	
-	// Generalized Error = Sqrt(term1 + term2 + term3)
+	// Generalized Error Formula = Sqrt(term1 + term2 + term3)
 	// term1: ((partial of calEnergy wrt uncalibratedEnergy) * uncalibratedEnergyErr)^2
 	// term2: ((partial of calEnergy wrt offset) * offsetErr)^2
 	// term3: ((partial of calEnergy wrt slope) * slopeErr)^2
@@ -345,28 +414,36 @@ Measurement PeakFinder::calibrate(Measurement uncalibrated) {
 }
 
 std::vector<TGraphErrors*> PeakFinder::getBackgroundPlots() {
+/* returns a vector of TGraphErrors* representing the background plots generated by backEst */
 	return this->backPlots;
 }
 
 FitResults PeakFinder::getCalibration() {
+/* returns this PeakFinder's current calibration as generated by findCalibration */
 	return this->calibration;
 }
 
 TGraphErrors* PeakFinder::getCalPlot() {
+/* returns the TGraphErrors* used to find the calibration in findCalibration */
 	return this->calPlot;
 }
 
 Double_t PeakFinder::getOverflowPos() {
-// returns the maximum uncalibrated position contained in the main histogram.
+/* returns the uncalibrated energy corresponding to the maximum bin in the raw histogram */
 	return 1.01 * this->data->GetMaximum("energy");
 }
 
 PeakSet PeakFinder::getPeakSet() {
-// returns the PeakSet being used by this PeakFinder.
+/* returns the PeakSet being used to store peak information for this PeakFinder */
 	return this->peaks;
 }
 
+PeakInfo PeakFinder::getPinnedPeak() {
+/* returns the PeakInfo corresponding to the pinned peak as found in constructor */
+	return this->pinnedPeak;
+}
+
 TH1D* PeakFinder::getRawPlot() {
-// returns the main histogram drawn for this PeakFinder
+/* returns the histogram containing raw data being analyed by this PeakFinder */
 	return this->rawPlot;
 }
