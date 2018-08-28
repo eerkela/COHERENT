@@ -19,13 +19,14 @@ private:
 	Double_t time;
 	Int_t numBins;
 	std::string channel;
-	PeakSet peaks;
+	PeakSet peaks;	
 	PeakInfo pinnedPeak;
 	FitResults calibration;
 	bool isNumber(std::string input);
 	
 public:
-	PeakFinder(TCanvas *canvas, TChain *c, PeakSet peaks, Double_t time, std::string channel);
+	PeakFinder(Double_t pinnedEnergy, TChain *c, std::string channel, TApplication *app);
+	void addPeakToSet(PeakInfo info);
 	PeakInfo findPeak(Double_t energy);
 	FitResults backEst(ParWindow win, Double_t range, std::string fitFunc);
 	void fit(FitInfo info);
@@ -36,8 +37,10 @@ public:
 	TGraphErrors *getCalPlot();
 	Double_t getOverflowPos();
 	PeakSet getPeakSet();
+	PeakInfo getPeakInfo(Double_t energy);
+	PeakInfo getPinnedPeak();
 	TH1D *getRawPlot();
-	Double_t snapToMax(TH1D *h, Int_t pos, Double_t low, Double_t high);
+	Double_t snapToMax(TH1D *h, Double_t low, Double_t high);
 };
 
 #endif
