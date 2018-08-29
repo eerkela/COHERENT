@@ -1,10 +1,13 @@
+#include <algorithm>
+#include <iostream>
+#include <fstream>
+
+#include <stdio.h>
 #include <TTree.h>
 #include <TCanvas.h>
 #include <TMath.h>
 #include <TH1.h>
 #include <TF1.h>
-#include <stdio.h>
-#include <algorithm>
 #include <TApplication.h>
 #include <TRint.h>
 #include <TGraph.h>
@@ -76,6 +79,9 @@ Notes and TODO:
 	fix background fits.
 
 	Figure out what's going on with canvases being overwritten.
+
+	ssh option to allow visualization: -Y
+		ssh -Y cenpa-rocks
 
 */
 
@@ -483,11 +489,11 @@ Int_t Calibration(string path, string mode, string option) {
 	*/
 	if (option.find("muon") != string::npos) {
 		
-		TCanvas *muonCanvas = new TCanvas("muonCanvas", "muonCanvas", 1200, 800);
-		muonCanvas->Divide(NUMFILES / 2, NUMFILES / 2 + 1);
+		TCanvas *muonFitCanvas = new TCanvas("muonCanvas", "muonCanvas", 1200, 800);
+		muonFitCanvas->Divide(NUMFILES / 2, NUMFILES / 2 + 1);
 
 		for (Int_t i = 0; i < NUMFILES; i++) {
-			muonCanvas->cd(i + 1);
+			muonFitCanvas->cd(i + 1);
 			FitResults calib = ANALYZERS[i]->getCalibration();
 			
 			ParWindow muFitWindow;
@@ -500,35 +506,26 @@ Int_t Calibration(string path, string mode, string option) {
 			if (muFitWindow.high < thresholdEnergy) {
 				Double_t pos = calib.slope * 25000 + calib.offset;
 
-				TH1D *h = ANALYZERS[i]->getRawPlot();
-				
-				Int_t nBins = h->GetNbinsX();
-				Double_t max = 1.01 * DATA[i]->GetMaximum("energy");
 				string muName = "MuH" + to_string(i + 1);
-				string label;
+				string lab;
 				if (mode == "pos") {
-					label = "Position " + to_string(POSITIONS[i]);
+					lab = "Position " + to_string(POSITIONS[i]);
 				} else if (mode == "volt") {
-					label = to_string(VOLTAGES[i]) + " V";
+					lab = to_string(VOLTAGES[i]) + " V";
 				}
-				TH1D *muH = new TH1D(muName.c_str(), label.c_str(), nBins/100, 0, max);
+				Int_t nBins = ANALYZERS[i]->getRawPlot()->GetNbinsX() / 100;
+				Double_t max = 1.01 * DATA[i]->GetMaximum("energy");
+				TH1D *muH = new TH1D(muName.c_str(), lab.c_str(), nBins, 0, max);
 				DATA[i]->Draw(("energy >> " + muName).c_str(), CHANNEL.c_str());
 				
 				muH->GetXaxis()->SetRangeUser(0.95 * pos, 1.05 * pos);
 				pos = muH->GetXaxis()->GetBinCenter(muH->GetMaximumBin());
 				muH->GetXaxis()->SetRangeUser(0, max);
 
-				cout << "expected muon peak val: " << pos << endl;
-
 				vector<Double_t> muFitPars;
 				muFitPars.push_back(muH->GetBinContent(muH->FindBin(pos)));
 				muFitPars.push_back(pos);
 				muFitPars.push_back(0.1 * pos);
-
-				cout << "muon fit window: " << endl;
-				cout << "low: " << muFitWindow.low;
-				cout << ", high: " << muFitWindow.high;
-				cout << " (max = " << max << ")" << endl;
 
 				TF1 *muonFit = new TF1("muonFit", "landau", muFitWindow.low, muFitWindow.high);
 				muonFit->SetParameters(&muFitPars[0]);
@@ -594,12 +591,23 @@ Int_t Calibration(string path, string mode, string option) {
 			positions.push_back((Double_t) POSITIONS[i]);		
 		}
 
-		cout << "############################################" << endl;
-		cout << "Cs PEAK PARS VS POSITION: " << endl;
+		time_t tempTime = time(NULL);
+		string currTime = ctime(&tempTime);
 		Double_t resolution = calibratedCsSigmas[3];
 		Double_t resolutionErr = calibratedCsSigmaErrs[3];
-		cout << "Cs peak resolution at 3rd position (keV): " << resolution;
-		cout << " +/- " << resolutionErr << endl;
+
+		ofstream outFile;
+		outFile.open(path + "CharLog.txt", ios_base::app);
+		outFile << "[" << currTime.substr(0, currTime.length()-1) << " PST]"; 
+		outFile << " Position Run" << endl;
+		outFile << "Cs resolution at 3rd position  =  " << resolution;
+		outFile << "  +/-  " << resolutionErr << "  keV" << endl;
+		outFile << endl;
+		
+
+		cout << "############################################" << endl;
+		cout << "POSITION CALIBRATION FINISHED" << endl;
+		cout << "see CharLog.txt for parameters" << endl;
 		cout << "############################################" << endl;
 		
 		TCanvas *CsPosCanvas = new TCanvas("CsPosCanvas", "CsPosCanvas");
@@ -624,9 +632,9 @@ Int_t Calibration(string path, string mode, string option) {
 		CsPosGraph->GetXaxis()->SetTitleOffset(1.2);
 	
 		CsPosGraph->Draw();
-		CsPosCanvas->Print("CsEvsPos.pdf[");
-		CsPosCanvas->Print("CsEvsPos.pdf");
-		CsPosCanvas->Print("CsEvsPos.pdf]");
+		CsPosCanvas->Print((path + "CsEvsPos.pdf[").c_str());
+		CsPosCanvas->Print((path + "CsEvsPos.pdf").c_str());
+		CsPosCanvas->Print((path + "CsEvsPos.pdf]").c_str());
 						
 		TCanvas *CsResCanvas = new TCanvas("CsResCanvas", "CsResCanvas");
 		TGraphErrors *CsResGraph = new TGraphErrors(NUMFILES, &positions[0], 
@@ -644,9 +652,9 @@ Int_t Calibration(string path, string mode, string option) {
 		CsResGraph->GetXaxis()->SetTitleOffset(1.2);
 		
 		CsResGraph->Draw();
-		CsResCanvas->Print("CsResvsPos.pdf[");
-		CsResCanvas->Print("CsResvsPos.pdf");
-		CsResCanvas->Print("CsResvsPos.pdf]");
+		CsResCanvas->Print((path + "CsResvsPos.pdf[").c_str());
+		CsResCanvas->Print((path + "CsResvsPos.pdf").c_str());
+		CsResCanvas->Print((path + "CsResvsPos.pdf]").c_str());
 
 	} else if (mode == "volt") {
 
@@ -690,12 +698,6 @@ Int_t Calibration(string path, string mode, string option) {
 		gainGraph->Fit("gainFit");
 		gainGraph->Draw();
 
-		// test for valid barium/muon fits here
-
-		cout << endl;
-		cout << "############################################" << endl;
-		cout << "GAIN VS VOLTAGE PARAMETERS (pol2):" << endl;
-
 		Double_t gainOffset = gainFit->GetParameter(0);
 		Double_t gainOffsetErr = gainFit->GetParError(0);
 		Double_t gainSlope = gainFit->GetParameter(1);
@@ -703,14 +705,28 @@ Int_t Calibration(string path, string mode, string option) {
 		Double_t gainCurvature = gainFit->GetParameter(2);
 		Double_t gainCurvatureErr = gainFit->GetParError(2);
 
-		cout << "Gain Offset (LOG(G0)): " << gainOffset << " +/- " << gainOffsetErr << endl;
-		cout << "Gain Slope: " << gainSlope << " +/- " << gainSlopeErr << endl;
-		cout << "Gain Curvature: " << gainCurvature << " +/- " << gainCurvatureErr << endl;
+		time_t tempTime = time(NULL);
+		string currTime = ctime(&tempTime);
+		ofstream outFile;
+		outFile.open(path + "CharLog.txt", ios_base::app);
+		outFile << "[" << currTime.substr(0, currTime.length()-1) << " PST]";
+		outFile << " Voltage Run" << endl;
+		outFile << "Gain Offset (LOG(G0))\t\t=  " << gainOffset;
+		outFile << "\t +/-  " << gainOffsetErr << endl;
+		outFile << "Gain Slope \t\t\t=  " << gainSlope;
+		outFile << "\t +/-  " << gainSlopeErr << endl;
+		outFile << "Gain Curvature \t\t\t=  " << gainCurvature;
+		outFile << "\t +/-  " << gainCurvatureErr << endl;
+		outFile << endl;
+
+		cout << "############################################" << endl;
+		cout << "VOLTAGE CALIBRATION FINISHED" << endl;
+		cout << "see CharLog.txt for parameters" << endl;
 		cout << "############################################" << endl;
 		
-		gainCanvas->Print("GainVsVolt.pdf[");
-		gainCanvas->Print("GainVsVolt.pdf");
-		gainCanvas->Print("GainVsVolt.pdf]");
+		gainCanvas->Print((path + "GainVsVolt.pdf[").c_str());
+		gainCanvas->Print((path + "GainVsVolt.pdf").c_str());
+		gainCanvas->Print((path + "GainVsVolt.pdf]").c_str());
 
 	}
 
@@ -1055,9 +1071,9 @@ Int_t Calibration(string path, string mode, string option) {
 		noiseGraph->Draw();
 		
 		if (mode == "volt") {
-			noiseCanvas->Print("Noise.pdf[");
-			noiseCanvas->Print("Noise.pdf");
-			noiseCanvas->Print("Noise.pdf]");
+			noiseCanvas->Print((path + "Noise.pdf[").c_str());
+			noiseCanvas->Print((path + "Noise.pdf").c_str());
+			noiseCanvas->Print((path + "Noise.pdf]").c_str());
 		}
 		
 	}
@@ -1161,11 +1177,12 @@ Double_t landauFunc(Double_t *x, Double_t *par) {
 */
 
 int main(int argc, char** argv) {
-	if (argc == 1) {
-		Calibration(argv[1], "pos", "");
-		Calibration(argv[1], "volt", "");
+	if (argc == 2) {
+		
+		Calibration(argv[1], "pos", "barium");
+		Calibration(argv[1], "volt", "barium");
 	} else if (argc == 3) {
-		Calibration(argv[1], argv[2], "");
+		Calibration(argv[1], argv[2], "barium");
 	} else if (argc == 4) {
 		Calibration(argv[1], argv[2], argv[3]);
 	} else {
